@@ -4,11 +4,14 @@ import bugReport from "../../examples/bug-reports/bugreport10-71239a/bugreport10
   type: "json",
 }
 import type { SimpleRouteJson } from "lib/types"
+import { getLastStepSvg } from "../fixtures/getLastStepSvg"
 
 const srj = bugReport.simple_route_json as SimpleRouteJson
 
 test("solve even when we have gaps between collision nodes and straw nodes", () => {
   const solver = new AutoroutingPipelineSolver(srj)
   solver.solve()
-  expect(solver.visualize()).toMatchSnapshot(`bugreport10-71239a`)
+  expect(getLastStepSvg(solver.visualize())).toMatchSvgSnapshot(
+    import.meta.path,
+  )
 })
