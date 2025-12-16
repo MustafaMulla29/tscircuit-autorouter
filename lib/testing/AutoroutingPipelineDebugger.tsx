@@ -7,9 +7,11 @@ import { BaseSolver } from "lib/solvers/BaseSolver"
 import { combineVisualizations } from "lib/utils/combineVisualizations"
 import { SimpleRouteJson } from "lib/types"
 import {
-  AutoroutingPipelineSolver,
+  AutoroutingPipelineSolver2_PortPointPathing,
   CapacityMeshSolver,
-} from "lib/solvers/AutoroutingPipelineSolver"
+} from "lib/autorouter-pipelines/AutoroutingPipeline2_PortPointPathing/AutoroutingPipelineSolver2_PortPointPathing"
+import { AssignableViaAutoroutingPipelineSolver } from "lib/autorouter-pipelines/AssignableAutoroutingPipeline/AssignableAutoroutingPipelineSolver"
+import { AutoroutingPipeline1_OriginalUnravel } from "lib/autorouter-pipelines/AutoroutingPipeline1_OriginalUnravel/AutoroutingPipeline1_OriginalUnravel"
 import { GraphicsObject, Line, Point, Rect } from "graphics-debug"
 import { limitVisualizations } from "lib/utils/limitVisualizations"
 import { getNodesNearNode } from "lib/solvers/UnravelSolver/getNodesNearNode"
@@ -24,7 +26,19 @@ import {
   getGlobalLocalStorageCache,
 } from "lib/cache/setupGlobalCaches"
 import { CacheProvider } from "lib/cache/types"
-import { AutoroutingPipelineMenuBar } from "./AutoroutingPipelineMenuBar"
+import {
+  AutoroutingPipelineMenuBar,
+  PIPELINE_OPTIONS,
+  type PipelineId,
+} from "./AutoroutingPipelineMenuBar"
+
+const PIPELINE_SOLVERS = {
+  AutoroutingPipelineSolver2_PortPointPathing,
+  AssignableViaAutoroutingPipelineSolver,
+  AutoroutingPipeline1_OriginalUnravel,
+} as const
+
+const PIPELINE_STORAGE_KEY = "selectedPipeline"
 
 interface CapacityMeshPipelineDebuggerProps {
   srj: SimpleRouteJson
@@ -78,7 +92,11 @@ export const AutoroutingPipelineDebugger = ({
 
   const setCacheProviderName = (newName: CacheProviderName) => {
     setCacheProviderNameState(newName)
-    localStorage.setItem("cacheProviderName", newName)
+    try {
+      localStorage.setItem("cacheProviderName", newName)
+    } catch (e) {
+      console.warn("Could not save cache provider to localStorage:", e)
+    }
   }
 
   const cacheProvider = useMemo(
@@ -86,19 +104,53 @@ export const AutoroutingPipelineDebugger = ({
     [cacheProviderName],
   )
 
-  const createNewSolver = (
-    opts: { cacheProvider?: CacheProvider | null } = {},
-  ) =>
-    createSolverProp
-      ? createSolverProp(srj, { cacheProvider, ...opts })
-      : new AutoroutingPipelineSolver(srj, {
-          cacheProvider,
-          ...opts,
-        })
-
-  const [solver, setSolver] = useState<CapacityMeshSolver>(() =>
-    createNewSolver(),
+  const [selectedPipelineId, setSelectedPipelineIdState] = useState<PipelineId>(
+    () =>
+      (localStorage.getItem(PIPELINE_STORAGE_KEY) as PipelineId) ||
+      "AutoroutingPipelineSolver2_PortPointPathing",
   )
+
+  const setSelectedPipelineId = (newPipelineId: PipelineId) => {
+    setSelectedPipelineIdState(newPipelineId)
+    try {
+      localStorage.setItem(PIPELINE_STORAGE_KEY, newPipelineId)
+    } catch (e) {
+      // localStorage might be full, ignore the error
+      console.warn("Could not save pipeline selection to localStorage:", e)
+    }
+  }
+
+  const createNewSolver = (
+    opts: {
+      cacheProvider?: CacheProvider | null
+      pipelineId?: PipelineId
+    } = {},
+  ) => {
+    if (createSolverProp) {
+      return createSolverProp(srj, { cacheProvider, ...opts })
+    }
+    const pipelineToUse = opts.pipelineId ?? selectedPipelineId
+    const SolverClass = PIPELINE_SOLVERS[pipelineToUse]
+    return new SolverClass(srj, {
+      cacheProvider,
+      ...opts,
+    })
+  }
+
+  const [solver, setSolver] = useState<any>(() => {
+    // Read directly from localStorage for initial render to avoid closure issues
+    const initialPipelineId =
+      (localStorage.getItem(PIPELINE_STORAGE_KEY) as PipelineId) ||
+      "AutoroutingPipelineSolver2_PortPointPathing"
+    const initialCacheName =
+      (localStorage.getItem("cacheProviderName") as CacheProviderName) ?? "None"
+    const initialCacheProvider =
+      getGlobalCacheProviderFromName(initialCacheName)
+    const SolverClass = PIPELINE_SOLVERS[initialPipelineId]
+    return createSolverProp
+      ? createSolverProp(srj, { cacheProvider: initialCacheProvider })
+      : new SolverClass(srj, { cacheProvider: initialCacheProvider })
+  })
   const [previewMode, setPreviewMode] = useState(false)
   const [renderer, setRenderer] = useState<"canvas" | "vector">(
     (window.localStorage.getItem("lastSelectedRenderer") as
@@ -206,6 +258,46 @@ export const AutoroutingPipelineDebugger = ({
       setForceUpdate((prev) => prev + 1)
     }
     isSolvingToBreakpointRef.current = false // Stop breakpoint solving on next stage
+  }
+
+  // Solve Sub function - steps until activeSubSolver of current phase changes or is solved
+  const handleSolveSub = () => {
+    if (!solver.solved && !solver.failed) {
+      const currentPhase = solver.activeSubSolver
+      if (!currentPhase) {
+        // No active phase, just step once
+        solver.step()
+        setForceUpdate((prev) => prev + 1)
+        return
+      }
+
+      const initialSubSolver = currentPhase.activeSubSolver
+
+      // Step until the sub-solver changes or becomes solved
+      while (!solver.solved && !solver.failed) {
+        const currentSubSolver = solver.activeSubSolver?.activeSubSolver
+
+        // Stop if sub-solver changed
+        if (currentSubSolver !== initialSubSolver) {
+          break
+        }
+
+        // Stop if sub-solver is now solved
+        if (currentSubSolver?.solved) {
+          break
+        }
+
+        // Stop if the phase itself changed
+        if (solver.activeSubSolver !== currentPhase) {
+          break
+        }
+
+        solver.step()
+      }
+
+      setForceUpdate((prev) => prev + 1)
+    }
+    isSolvingToBreakpointRef.current = false // Stop breakpoint solving on solve sub
   }
 
   // Solve completely
@@ -456,7 +548,11 @@ export const AutoroutingPipelineDebugger = ({
     ) {
       solver.step()
       // Check if the target solver became active *after* the step
-      if (solver?.[targetSolverStageKey as keyof AutoroutingPipelineSolver]) {
+      if (
+        solver?.[
+          targetSolverStageKey as keyof AutoroutingPipelineSolver2_PortPointPathing
+        ]
+      ) {
         break
       }
     }
@@ -546,6 +642,14 @@ export const AutoroutingPipelineDebugger = ({
         onClearCache={() => {
           cacheProvider?.clearCache()
         }}
+        selectedPipelineId={selectedPipelineId}
+        onSetPipelineId={(pipelineId: PipelineId) => {
+          setSelectedPipelineId(pipelineId)
+          const SolverClass = PIPELINE_SOLVERS[pipelineId]
+          setSolver(new SolverClass(srj, { cacheProvider }))
+          setDrcErrors(null)
+          setDrcErrorCount(0)
+        }}
       />
       <div className="flex gap-2 mb-4 text-xs">
         <button
@@ -561,6 +665,13 @@ export const AutoroutingPipelineDebugger = ({
           disabled={solver.solved || solver.failed}
         >
           Next Stage
+        </button>
+        <button
+          className="border rounded-md p-2 hover:bg-gray-100"
+          onClick={handleSolveSub}
+          disabled={solver.solved || solver.failed}
+        >
+          Solve Sub
         </button>
         <button
           className="border rounded-md p-2 hover:bg-gray-100"
@@ -732,15 +843,15 @@ export const AutoroutingPipelineDebugger = ({
                             )
                           }
 
-                          // Get the node with port points from the segmentToPointOptimizer
+                          // Get the node with port points from the portPointPathingSolver
                           let nodeWithPortPoints = null
                           if (
-                            solver.unravelMultiSectionSolver
+                            solver.portPointPathingSolver
                               ?.getNodesWithPortPoints
                           ) {
                             nodeWithPortPoints = solver
-                              .unravelMultiSectionSolver!.getNodesWithPortPoints()
-                              .find((n) => n.capacityMeshNodeId === nodeId)
+                              .portPointPathingSolver!.getNodesWithPortPoints()
+                              .find((n: any) => n.capacityMeshNodeId === nodeId)
                           }
 
                           const dataToDownload = {
@@ -771,80 +882,7 @@ export const AutoroutingPipelineDebugger = ({
                   >
                     Download High Density Node Input (NodeWithPortPoints)
                   </button>
-                  <button
-                    className="mt-2 bg-blue-500 hover:bg-blue-600 text-white py-1 px-3 rounded text-sm"
-                    onClick={() => {
-                      const match = dialogObject.label!.match(/cn(\d+)/)
-                      const nodeId = `cn${parseInt(match![1], 10)}`
-                      const umss = solver.unravelMultiSectionSolver
-                      if (!umss) return
-                      const verboseInput = {
-                        dedupedSegments: umss.dedupedSegments,
-                        dedupedSegmentMap: umss.dedupedSegmentMap,
-                        nodeMap: umss.nodeMap,
-                        nodeIdToSegmentIds: umss.nodeIdToSegmentIds,
-                        segmentIdToNodeIds: umss.segmentIdToNodeIds,
-                        colorMap: umss.colorMap,
-                        rootNodeId: nodeId,
-                        MUTABLE_HOPS: umss.MUTABLE_HOPS,
-                        segmentPointMap: umss.segmentPointMap,
-                        nodeToSegmentPointMap: umss.nodeToSegmentPointMap,
-                        segmentToSegmentPointMap: umss.segmentToSegmentPointMap,
-                      }
-
-                      const relevantNodeIds = new Set(
-                        getNodesNearNode({
-                          nodeId,
-                          nodeIdToSegmentIds: umss.nodeIdToSegmentIds,
-                          segmentIdToNodeIds: umss.segmentIdToNodeIds,
-                          hops: 8,
-                        }),
-                      )
-
-                      // Filter the verbose input to only include content related to relevant nodes
-                      const filteredVerboseInput =
-                        filterUnravelMultiSectionInput(
-                          verboseInput,
-                          relevantNodeIds,
-                        )
-
-                      // Create a JSON string with proper formatting
-                      const filteredInputJson = JSON.stringify(
-                        filteredVerboseInput,
-                        (key, value) => {
-                          // Convert Maps to objects for JSON serialization
-                          if (value instanceof Map) {
-                            return Object.fromEntries(value)
-                          }
-                          return value
-                        },
-                        2,
-                      )
-
-                      // Create a blob with the JSON data
-                      const blob = new Blob([filteredInputJson], {
-                        type: "application/json",
-                      })
-
-                      // Create a URL for the blob
-                      const url = URL.createObjectURL(blob)
-
-                      // Create a temporary anchor element
-                      const a = document.createElement("a")
-
-                      // Set the download filename
-                      a.download = `unravel_section_${nodeId}_input.json`
-                      a.href = url
-
-                      // Trigger the download
-                      a.click()
-
-                      // Clean up by revoking the URL
-                      URL.revokeObjectURL(url)
-                    }}
-                  >
-                    Download Unravel Section Input
-                  </button>
+                  {/* Unravel section debug button removed - unravelMultiSectionSolver no longer exists */}
                 </div>
               )}
             </div>
@@ -875,7 +913,7 @@ export const AutoroutingPipelineDebugger = ({
 
               // Calculate total time spent across all stages that have started
               const totalTimeMs =
-                solver.pipelineDef?.reduce((total, step) => {
+                solver.pipelineDef?.reduce((total: number, step: any) => {
                   const startTime = solver.startTimeOfPhase[step.solverName]
                   if (startTime === undefined) return total // Stage hasn't started
                   const endTime =
@@ -883,7 +921,7 @@ export const AutoroutingPipelineDebugger = ({
                   return total + (endTime - startTime)
                 }, 0) ?? 0
 
-              return solver.pipelineDef?.map((step, index) => {
+              return solver.pipelineDef?.map((step: any, index: number) => {
                 const stepSolver = solver[
                   step.solverName as keyof CapacityMeshSolver
                 ] as BaseSolver | undefined
