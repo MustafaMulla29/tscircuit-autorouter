@@ -65,6 +65,8 @@ export class AvailableSegmentPointSolver extends BaseSolver {
 
   colorMap: Record<string, string>
 
+  // edgeMargin = 0.25
+
   constructor({
     nodes,
     edges,
@@ -142,14 +144,26 @@ export class AvailableSegmentPointSolver extends BaseSolver {
 
     // Apply edge margin to avoid placing points too close to corners
     // The margin is half the port spacing to ensure points are at least that far from edges
-    const edgeMargin = this.minPortSpacing / 2
-    const effectiveLength = Math.max(0, segmentLength - 2 * edgeMargin)
+    const edgeMargin = (this.minPortSpacing * 3) / 4 // this.edgeMargin + segmentLength * 0.1
+    const effectiveLength = Math.max(0, segmentLength - edgeMargin * 2)
+
+    if (
+      effectiveLength <= 0 &&
+      !node1._containsTarget &&
+      !node2._containsTarget
+    ) {
+      return null
+    }
 
     // At minimum we need 1 port point, at maximum we space them minPortSpacing apart
-    const maxPortPoints = Math.max(
+    let maxPortPoints = Math.max(
       1,
       Math.floor(effectiveLength / this.minPortSpacing) + 1,
     )
+
+    if (node1._offBoardConnectionId || node2._offBoardConnectionId) {
+      maxPortPoints = 1
+    }
 
     // Create port points evenly spaced along the segment
     // Each port point is created for a single layer (not multiple layers)
@@ -160,6 +174,10 @@ export class AvailableSegmentPointSolver extends BaseSolver {
     // Center of the segment
     const centerX = (overlap.start.x + overlap.end.x) / 2
     const centerY = (overlap.start.y + overlap.end.y) / 2
+
+    if (maxPortPoints > 5) {
+      maxPortPoints = 5 + maxPortPoints / 4
+    }
 
     // First pass: compute all XY positions and find which is closest to segment center
     const xyPositions: Array<{ x: number; y: number; distToCenter: number }> =

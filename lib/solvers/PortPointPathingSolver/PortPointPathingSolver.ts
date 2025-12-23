@@ -18,6 +18,7 @@ import {
   cloneAndShuffleArray,
   seededRandom,
 } from "lib/utils/cloneAndShuffleArray"
+import { computeSectionScore } from "../MultiSectionPortPointOptimizer"
 
 export interface PortPointPathingHyperParameters {
   SHUFFLE_SEED?: number
@@ -26,11 +27,19 @@ export interface PortPointPathingHyperParameters {
   GREEDY_MULTIPLIER?: number
   NODE_PF_FACTOR?: number
   RANDOM_COST_MAGNITUDE?: number
+  NODE_PF_MAX_PENALTY?: number
 
   MEMORY_PF_FACTOR?: number
   BASE_CANDIDATE_COST?: number
+  MIN_ALLOWED_BOARD_SCORE?: number
 
   MAX_ITERATIONS_PER_PATH?: number
+  FORCE_CENTER_FIRST?: boolean
+
+  RANDOM_WALK_DISTANCE?: number
+
+  FORCE_OFF_BOARD_FREQUENCY?: number
+  FORCE_OFF_BOARD_SEED?: number
 }
 
 /**
@@ -46,6 +55,8 @@ export interface InputPortPoint {
   connectionNodeIds: [CapacityMeshNodeId, CapacityMeshNodeId]
   /** XY distance to the centermost port on this Z level (centermost port has distance 0) */
   distToCentermostPortOnZ: number
+
+  connectsToOffBoardNode?: boolean
 }
 
 /**
@@ -64,6 +75,9 @@ export interface InputNodeWithPortPoints {
   _containsTarget?: boolean
   /** If true, this node contains an obstacle */
   _containsObstacle?: boolean
+
+  _offBoardConnectionId?: string
+  _offBoardConnectedCapacityMeshNodeIds?: CapacityMeshNodeId[]
 }
 
 /**
@@ -83,6 +97,12 @@ export interface PortPointCandidate {
   f: number
   g: number
   h: number
+  /** Total distance traveled from start to this candidate */
+  distanceTraveled: number
+  /** Whether this candidate has ever crossed through an off-board node */
+  hasTouchedOffBoardNode?: boolean
+
+  lastMoveWasOffBoard?: boolean
 }
 
 export interface ConnectionPathResult {
@@ -136,9 +156,19 @@ export class PortPointPathingSolver extends BaseSolver {
   /** Factor applied to port point reuse penalty */
   PORT_POINT_REUSE_FACTOR = 1000
 
+  /**
+   * Cost when a node doesn't go off board when it's supposed to w/ the
+   * FORCE_OFF_BOARD_FREQUENCY setting.
+   */
+  BASE_COST_FOR_NOT_GOING_OFF_BOARD = 100
+
   /** Multiplied by Pf delta cost (in -log(1-pf) space) */
   get NODE_PF_FACTOR() {
     return this.hyperParameters.NODE_PF_FACTOR ?? 50
+  }
+
+  get RANDOM_WALK_DISTANCE() {
+    return this.hyperParameters.RANDOM_WALK_DISTANCE ?? 0
   }
 
   /** Used only in heuristic (h) to "look ahead" into known-congested regions */
@@ -160,8 +190,30 @@ export class PortPointPathingSolver extends BaseSolver {
     return this.hyperParameters.BASE_CANDIDATE_COST ?? 0
   }
 
-  /** Cost penalty for changing layers (used in heuristic) */
-  Z_DIST_COST = 0
+  get NODE_PF_MAX_PENALTY() {
+    return this.hyperParameters.NODE_PF_MAX_PENALTY ?? 10_000
+  }
+
+  get FORCE_CENTER_FIRST() {
+    return this.hyperParameters.FORCE_CENTER_FIRST ?? true
+  }
+
+  get FORCE_OFF_BOARD_FREQUENCY() {
+    if (this.offBoardNodes.length === 0) return 0
+    return this.hyperParameters.FORCE_OFF_BOARD_FREQUENCY ?? 0
+  }
+
+  get FORCE_OFF_BOARD_SEED() {
+    return this.hyperParameters.FORCE_OFF_BOARD_SEED ?? 0
+  }
+
+  get NODE_MAX_PF() {
+    const NODE_MAX_PF = Math.min(
+      0.99999,
+      1 - Math.exp(-this.NODE_PF_MAX_PENALTY),
+    )
+    return NODE_MAX_PF
+  }
 
   /** Penalty factor for port points that are far from the center of the segment */
   get CENTER_OFFSET_DIST_PENALTY_FACTOR() {
@@ -174,10 +226,14 @@ export class PortPointPathingSolver extends BaseSolver {
     return this.hyperParameters.GREEDY_MULTIPLIER ?? 1.3
   }
 
-  MAX_CANDIDATES_IN_MEMORY = 50_000
+  MAX_CANDIDATES_IN_MEMORY = 1000
 
   get MAX_ITERATIONS_PER_PATH() {
     return this.hyperParameters.MAX_ITERATIONS_PER_PATH ?? 4000
+  }
+
+  get MIN_ALLOWED_BOARD_SCORE() {
+    return this.hyperParameters.MIN_ALLOWED_BOARD_SCORE ?? -10000
   }
 
   nodeMemoryPfMap: Map<CapacityMeshNodeId, number>
@@ -195,10 +251,14 @@ export class PortPointPathingSolver extends BaseSolver {
   /** Heuristic scaling: an estimate of "node pitch" used to estimate remaining hops */
   avgNodePitch = 1
 
+  /** Whether the current connection should be forced to route off-board */
+  currentConnectionShouldRouteOffBoard = false
+
+  /** Cached list of off-board nodes for computing distance to nearest off-board node */
+  offBoardNodes: InputNodeWithPortPoints[] = []
+
   /** Cache of base node cost (cost of node in current committed state) */
   private baseNodeCostCache = new Map<CapacityMeshNodeId, number>()
-  /** Cache of delta cost for a specific node segment (entry->exit) for a specific connection */
-  private segmentDeltaCostCache = new Map<string, number>()
 
   constructor({
     simpleRouteJson,
@@ -224,9 +284,7 @@ export class PortPointPathingSolver extends BaseSolver {
       capacityMeshNodes.map((n) => [n.capacityMeshNodeId, n]),
     )
     this.nodeMemoryPfMap = nodeMemoryPfMap ?? new Map()
-    this.hyperParameters = hyperParameters ?? {
-      SHUFFLE_SEED: 0,
-    }
+    this.hyperParameters = hyperParameters ?? {}
     this.nodeMap = new Map(inputNodes.map((n) => [n.capacityMeshNodeId, n]))
 
     // Compute a rough node pitch to convert distance into estimated hops for heuristic
@@ -237,6 +295,9 @@ export class PortPointPathingSolver extends BaseSolver {
       pitches.length > 0
         ? pitches.reduce((a, b) => a + b, 0) / pitches.length
         : 1
+
+    // Cache off-board nodes for FORCE_OFF_BOARD routing
+    this.offBoardNodes = inputNodes.filter((n) => n._offBoardConnectionId)
 
     // Build port point maps
     this.portPointMap = new Map()
@@ -272,7 +333,6 @@ export class PortPointPathingSolver extends BaseSolver {
 
   private clearCostCaches() {
     this.baseNodeCostCache.clear()
-    this.segmentDeltaCostCache.clear()
   }
 
   private clampPf(pf: number): number {
@@ -284,16 +344,9 @@ export class PortPointPathingSolver extends BaseSolver {
   /** Convert Pf into an additive "failure cost" */
   private pfToFailureCost(pf: number): number {
     const p = this.clampPf(pf)
+    if (p >= this.NODE_MAX_PF) return this.NODE_PF_MAX_PENALTY
     // -log(1-p) is 0 at p=0 and increases quickly as p->1
     return -Math.log(1 - p)
-  }
-
-  private round3(n: number): number {
-    return Math.round(n * 1000) / 1000
-  }
-
-  private pointKey(p: { x: number; y: number }, z: number): string {
-    return `${this.round3(p.x)},${this.round3(p.y)},${z}`
   }
 
   /** Base node cost with the currently-committed port points (no candidate additions) */
@@ -310,6 +363,11 @@ export class PortPointPathingSolver extends BaseSolver {
     return baseCost
   }
 
+  computeBoardScore(): number {
+    const allNodesWithPortPoints = this.getNodesWithPortPoints()
+    return computeSectionScore(allNodesWithPortPoints, this.capacityMeshNodeMap)
+  }
+
   /**
    * Exact delta cost of routing this connection through `nodeId`
    * for the segment defined by entry->exit.
@@ -323,17 +381,6 @@ export class PortPointPathingSolver extends BaseSolver {
     entry: PortPoint,
     exit: PortPoint,
   ): number {
-    const key = `${nodeId}|${this.pointKey(
-      { x: entry.x, y: entry.y },
-      entry.z,
-    )}|${this.pointKey(
-      { x: exit.x, y: exit.y },
-      exit.z,
-    )}|${entry.connectionName}|${entry.rootConnectionName ?? ""}`
-
-    const cached = this.segmentDeltaCostCache.get(key)
-    if (cached != null) return cached
-
     const node = this.nodeMap.get(nodeId)
     if (!node) return 0
 
@@ -343,10 +390,11 @@ export class PortPointPathingSolver extends BaseSolver {
     const afterCost = this.pfToFailureCost(pfAfter)
 
     // If the estimator ever yields a lower Pf after adding points, don't reward it here.
-    const delta = Math.max(0, afterCost - baseCost) * this.NODE_PF_FACTOR
+    const delta = Math.max(0, afterCost - baseCost)
 
-    this.segmentDeltaCostCache.set(key, delta)
-    return delta
+    if (pfAfter >= this.NODE_MAX_PF) return this.NODE_PF_MAX_PENALTY
+
+    return delta * this.NODE_PF_FACTOR
   }
 
   getConnectionsWithNodes() {
@@ -494,11 +542,6 @@ export class PortPointPathingSolver extends BaseSolver {
     const leavingNodeId = prevCandidate.currentNodeId
     const prevPoint = prevCandidate.point
 
-    const distanceCost = distance(prevPoint, {
-      x: exitPortPoint.x,
-      y: exitPortPoint.y,
-    })
-
     const entry: PortPoint = {
       x: prevPoint.x,
       y: prevPoint.y,
@@ -521,27 +564,7 @@ export class PortPointPathingSolver extends BaseSolver {
       exit,
     )
 
-    const reusePenalty = this.getPortPointReusePenalty(
-      exitPortPoint.portPointId,
-      rootConnectionName,
-    )
-
-    const distToCentermostPortWithFocusShift =
-      exitPortPoint.distToCentermostPortOnZ - this.CENTER_OFFSET_FOCUS_SHIFT
-    const centerOffsetPenalty =
-      distToCentermostPortWithFocusShift ** 2 *
-      this.CENTER_OFFSET_DIST_PENALTY_FACTOR
-
-    // NOTE: random is intentionally NOT included in g so g remains an "exact path cost".
-    // It will be used as a tie-breaker in f.
-    return (
-      prevCandidate.g +
-      this.BASE_CANDIDATE_COST +
-      distanceCost +
-      nodeDeltaCost +
-      reusePenalty +
-      centerOffsetPenalty
-    )
+    return prevCandidate.g + nodeDeltaCost
   }
 
   /**
@@ -555,7 +578,6 @@ export class PortPointPathingSolver extends BaseSolver {
     rootConnectionName?: string,
   ): number {
     const endNodeId = candidateAtEndNode.currentNodeId
-    const distanceCost = distance(candidateAtEndNode.point, endPoint)
 
     const entry: PortPoint = {
       x: candidateAtEndNode.point.x,
@@ -578,12 +600,26 @@ export class PortPointPathingSolver extends BaseSolver {
       exit,
     )
 
-    return (
-      candidateAtEndNode.g +
-      this.BASE_CANDIDATE_COST +
-      distanceCost +
-      nodeDeltaCost
-    )
+    return candidateAtEndNode.g + nodeDeltaCost
+  }
+
+  /**
+   * Compute distance to the nearest off-board node from a point.
+   */
+  computeDistanceToNearestOffBoardNode(point: {
+    x: number
+    y: number
+  }): number {
+    if (this.offBoardNodes.length === 0) return Infinity
+
+    let minDist = Infinity
+    for (const node of this.offBoardNodes) {
+      const dist = distance(point, node.center)
+      if (dist < minDist) {
+        minDist = dist
+      }
+    }
+    return minDist
   }
 
   /**
@@ -595,11 +631,30 @@ export class PortPointPathingSolver extends BaseSolver {
    *  - memoryPfMap to bias away from historically high Pf regions
    */
   computeH(
-    point: { x: number; y: number },
+    point: InputPortPoint,
     currentNodeId: CapacityMeshNodeId,
     endGoalNodeId: CapacityMeshNodeId,
     currentZ: number,
+    distanceTraveled: number,
+    hasTouchedOffBoardNode?: boolean,
   ): number {
+    // Random walk: if we haven't traveled far enough, return 0 to encourage exploration
+    if (
+      this.RANDOM_WALK_DISTANCE > 0 &&
+      distanceTraveled < this.RANDOM_WALK_DISTANCE
+    ) {
+      return 0
+    }
+
+    // If we should force off-board routing and haven't touched an off-board node yet,
+    // return distance to nearest off-board node to guide the path there
+    if (this.currentConnectionShouldRouteOffBoard && !hasTouchedOffBoardNode) {
+      return (
+        this.BASE_COST_FOR_NOT_GOING_OFF_BOARD +
+        this.computeDistanceToNearestOffBoardNode(point)
+      )
+    }
+
     const endNode = this.nodeMap.get(endGoalNodeId)
     if (!endNode) return 0
 
@@ -607,21 +662,21 @@ export class PortPointPathingSolver extends BaseSolver {
     const estHops =
       this.avgNodePitch > 0 ? distanceToGoal / this.avgNodePitch : 0
 
-    const memPfHere = this.clampPf(this.nodeMemoryPfMap.get(currentNodeId) ?? 0)
-    const memPfGoal = this.clampPf(this.nodeMemoryPfMap.get(endGoalNodeId) ?? 0)
-    const avgMemPf = (memPfHere + memPfGoal) / 2
+    const memPf = this.clampPf(this.nodeMemoryPfMap.get(currentNodeId) ?? 0)
 
     // Convert memory Pf into an additive cost per hop (same log-space)
-    const memRiskPerHop = this.pfToFailureCost(avgMemPf) * this.MEMORY_PF_FACTOR
-    const memRiskCost = estHops * memRiskPerHop
+    const memRiskForHop = this.pfToFailureCost(memPf) * this.MEMORY_PF_FACTOR
 
     // Estimate the remaining "step costs"
     const estStepCost = estHops * this.BASE_CANDIDATE_COST
 
-    const needsLayerChange = !endNode.availableZ.includes(currentZ)
-    const zChangeCost = needsLayerChange ? this.Z_DIST_COST : 0
+    const centerOffsetDistPenalty =
+      this.CENTER_OFFSET_DIST_PENALTY_FACTOR *
+      point.distToCentermostPortOnZ ** 2
 
-    return distanceToGoal + estStepCost + memRiskCost + zChangeCost
+    return (
+      distanceToGoal + estStepCost + memRiskForHop + centerOffsetDistPenalty
+    )
   }
 
   getAvailableExitPortPoints(nodeId: CapacityMeshNodeId) {
@@ -661,13 +716,14 @@ export class PortPointPathingSolver extends BaseSolver {
     _endGoalNodeId: CapacityMeshNodeId,
   ): InputPortPoint[] {
     const portPoints = this.nodePortPointsMap.get(nodeId) ?? []
+    const currentNode = this.nodeMap.get(nodeId)
     const currentConnection =
       this.connectionsWithResults[this.currentConnectionIndex]
     const currentRootConnectionName =
       currentConnection?.connection.rootConnectionName
 
     // Group by "other side node" + z
-    const groups = new Map<string, InputPortPoint[]>()
+    const portsOnSameEdgeMap = new Map<string, InputPortPoint[]>()
 
     for (const pp of portPoints) {
       if (this.visitedPortPoints?.has(pp.portPointId)) continue
@@ -675,21 +731,23 @@ export class PortPointPathingSolver extends BaseSolver {
       const otherNodeId = this.getOtherNodeId(pp, nodeId)
       if (!otherNodeId) continue
 
-      const key = `${otherNodeId}|${pp.z}`
-      const arr = groups.get(key) ?? []
+      const otherNode = this.nodeMap.get(otherNodeId)
+
+      const edgeKey = `${otherNodeId}|${pp.z}`
+      const arr = portsOnSameEdgeMap.get(edgeKey) ?? []
       arr.push(pp)
-      groups.set(key, arr)
+      portsOnSameEdgeMap.set(edgeKey, arr)
     }
 
     const result: InputPortPoint[] = []
 
-    for (const [, group] of groups) {
+    for (const [, portsOnSameEdge] of portsOnSameEdgeMap) {
       // Sort by "center offset distance" (0 first)
-      group.sort(
+      portsOnSameEdge.sort(
         (a, b) => a.distToCentermostPortOnZ - b.distToCentermostPortOnZ,
       )
 
-      const center = group[0]
+      const center = portsOnSameEdge[0]
       if (!center) continue
 
       // If center is already assigned, add adjacent offsets (next closest ones)
@@ -704,9 +762,10 @@ export class PortPointPathingSolver extends BaseSolver {
       }
 
       const unassignedOnSide: InputPortPoint[] = []
-      for (let i = 1; i < group.length; i++) {
-        if (this.assignedPortPoints.has(group[i].portPointId)) continue
-        unassignedOnSide.push(group[i])
+      for (let i = 1; i < portsOnSameEdge.length; i++) {
+        if (this.assignedPortPoints.has(portsOnSameEdge[i].portPointId))
+          continue
+        unassignedOnSide.push(portsOnSameEdge[i])
       }
       result.push(...unassignedOnSide)
     }
@@ -714,12 +773,54 @@ export class PortPointPathingSolver extends BaseSolver {
     return result
   }
 
+  getAvailableExitPortPointsForOffboardConnection(nodeId: CapacityMeshNodeId) {
+    const currentNode = this.nodeMap.get(nodeId)
+    if (!currentNode) return []
+    const currentConnection =
+      this.connectionsWithResults[this.currentConnectionIndex]
+    const currentRootConnectionName =
+      currentConnection?.connection.rootConnectionName
+    const availablePortPoints: (InputPortPoint & {
+      throughNodeId: CapacityMeshNodeId
+    })[] = []
+
+    // If this node is connected to other nodes via off board connections, also
+    // add the port points for the other nodes
+    for (const otherNodeId of currentNode?._offBoardConnectedCapacityMeshNodeIds ??
+      []) {
+      if (otherNodeId === nodeId) continue
+      const otherNode = this.nodeMap.get(otherNodeId)
+      if (!otherNode) continue
+      const otherPortPoints = this.nodePortPointsMap.get(otherNodeId) ?? []
+      for (const pp of otherPortPoints) {
+        if (this.visitedPortPoints?.has(pp.portPointId)) continue
+        const assignment = this.assignedPortPoints.get(pp.portPointId)
+        if (
+          assignment &&
+          assignment.rootConnectionName !== currentRootConnectionName
+        )
+          continue
+        availablePortPoints.push({
+          ...pp,
+          throughNodeId: otherNodeId,
+        })
+      }
+    }
+
+    return availablePortPoints
+  }
+
   canTravelThroughObstacle(
     node: InputNodeWithPortPoints,
     connectionName: string,
+    rootConnectionName: string,
   ): boolean {
     const goalNodeIds = this.connectionNameToGoalNodeIds.get(connectionName)
-    return goalNodeIds?.includes(node.capacityMeshNodeId) ?? false
+
+    return (
+      goalNodeIds?.includes(node.capacityMeshNodeId) ||
+      Boolean(node._offBoardConnectionId)
+    )
   }
 
   /**
@@ -778,6 +879,26 @@ export class PortPointPathingSolver extends BaseSolver {
         const nodePortPoints = this.nodeAssignedPortPoints.get(nodeId) ?? []
         nodePortPoints.push(portPoint)
         this.nodeAssignedPortPoints.set(nodeId, nodePortPoints)
+      }
+    }
+
+    // Mark all nodes that are off board connected to have all their port points
+    // assigned
+    const nodeIdsInPath = Array.from(new Set(path.map((c) => c.currentNodeId)))
+    for (const nodeId of nodeIdsInPath) {
+      const node = this.nodeMap.get(nodeId)
+      if (!node) continue
+      if (!node._offBoardConnectionId) continue
+      for (const offBoardConnectedNodeId of node?._offBoardConnectedCapacityMeshNodeIds ??
+        []) {
+        const portPoints =
+          this.nodePortPointsMap.get(offBoardConnectedNodeId) ?? []
+        for (const pp of portPoints) {
+          this.assignedPortPoints.set(pp.portPointId, {
+            connectionName,
+            rootConnectionName,
+          })
+        }
       }
     }
 
@@ -862,6 +983,15 @@ export class PortPointPathingSolver extends BaseSolver {
     const nextConnection =
       this.connectionsWithResults[this.currentConnectionIndex]
     if (!nextConnection) {
+      const boardScore = this.computeBoardScore()
+      this.stats = {
+        boardScore,
+      }
+      if (boardScore < this.MIN_ALLOWED_BOARD_SCORE) {
+        this.failed = true
+        this.error = `Board score ${boardScore.toFixed(2)} is less than MIN_ALLOWED_BOARD_SCORE ${this.MIN_ALLOWED_BOARD_SCORE.toFixed(2)}`
+        return
+      }
       this.solved = true
       return
     }
@@ -895,6 +1025,17 @@ export class PortPointPathingSolver extends BaseSolver {
       // New connection search: clear caches (base costs depend on committed state)
       this.clearCostCaches()
 
+      // Determine if this connection should route off-board based on frequency and seed
+      if (this.FORCE_OFF_BOARD_FREQUENCY > 0) {
+        const random = seededRandom(
+          this.FORCE_OFF_BOARD_SEED + this.currentConnectionIndex,
+        )
+        this.currentConnectionShouldRouteOffBoard =
+          random() < this.FORCE_OFF_BOARD_FREQUENCY
+      } else {
+        this.currentConnectionShouldRouteOffBoard = false
+      }
+
       // Create initial candidates for each available z layer on the start node
       this.candidates = []
       this.visitedPortPoints = new Set<string>()
@@ -904,7 +1045,14 @@ export class PortPointPathingSolver extends BaseSolver {
           ? { x: startPoint.x, y: startPoint.y }
           : startNode.center
 
-        const h = this.computeH(p, startNodeId, endNodeId, z)
+        const h = this.computeH(
+          { ...p, distToCentermostPortOnZ: 0 } as any,
+          startNodeId,
+          endNodeId,
+          z,
+          0,
+          false, // hasTouchedOffBoardNode
+        )
         const f = 0 + h * this.GREEDY_MULTIPLIER
 
         this.candidates.push({
@@ -916,6 +1064,8 @@ export class PortPointPathingSolver extends BaseSolver {
           f,
           g: 0,
           h,
+          distanceTraveled: 0,
+          hasTouchedOffBoardNode: false,
         })
       }
     }
@@ -968,6 +1118,9 @@ export class PortPointPathingSolver extends BaseSolver {
         g: finalG,
         h: 0,
         f: finalG,
+        distanceTraveled:
+          currentCandidate.distanceTraveled +
+          distance(currentCandidate.point, finalPoint),
       }
 
       const path = this.getBacktrackedPath(finalCandidate)
@@ -985,6 +1138,8 @@ export class PortPointPathingSolver extends BaseSolver {
       this.clearCostCaches()
 
       this.currentConnectionIndex++
+      this.progress =
+        this.currentConnectionIndex / this.connectionsWithResults.length
       this.candidates = null
       this.visitedPortPoints = null
       this.currentPathIterations = 0
@@ -992,10 +1147,27 @@ export class PortPointPathingSolver extends BaseSolver {
     }
 
     // Expand to available port points from current node
-    const availablePortPoints = this.getAvailableExitPortPointsWithOmissions(
-      currentCandidate.currentNodeId,
-      endNodeId,
-    )
+
+    let availablePortPoints: InputPortPoint[]
+    const currentNode = this.nodeMap.get(currentCandidate.currentNodeId)
+    if (currentNode?._offBoardConnectionId) {
+      availablePortPoints =
+        this.getAvailableExitPortPointsForOffboardConnection(
+          currentCandidate.currentNodeId,
+        )
+      // for (const pp of availablePortPoints) {
+      //   this.visitedPortPoints?.add(pp.portPointId)
+      // }
+    } else if (this.FORCE_CENTER_FIRST) {
+      availablePortPoints = this.getAvailableExitPortPointsWithOmissions(
+        currentCandidate.currentNodeId,
+        endNodeId,
+      )
+    } else {
+      availablePortPoints = this.getAvailableExitPortPoints(
+        currentCandidate.currentNodeId,
+      )
+    }
 
     for (const portPoint of availablePortPoints) {
       // Don't revisit port points in this path chain
@@ -1006,22 +1178,32 @@ export class PortPointPathingSolver extends BaseSolver {
       }
 
       // Get the node we'd enter via this port point
-      const targetNodeId = this.getOtherNodeId(
+      const nextNodeId = this.getOtherNodeId(
         portPoint,
-        currentCandidate.currentNodeId,
+        (portPoint as { throughNodeId?: CapacityMeshNodeId }).throughNodeId ??
+          currentCandidate.currentNodeId,
       )
-      if (!targetNodeId) continue
+      if (!nextNodeId) continue
+
+      const throughNode =
+        "throughNodeId" in portPoint && portPoint.throughNodeId
+          ? this.nodeMap.get(portPoint.throughNodeId as string)
+          : null
 
       // Prevent node cycles (keeps delta-pf accounting correct)
-      if (this.isNodeInPathChain(currentCandidate, targetNodeId)) continue
+      if (this.isNodeInPathChain(currentCandidate, nextNodeId)) continue
 
-      const targetNode = this.nodeMap.get(targetNodeId)
-      if (!targetNode) continue
+      const nextNode = this.nodeMap.get(nextNodeId)
+      if (!nextNode) continue
 
       // Check obstacle constraints
       if (
-        targetNode._containsObstacle &&
-        !this.canTravelThroughObstacle(targetNode, connectionName)
+        nextNode._containsObstacle &&
+        !this.canTravelThroughObstacle(
+          nextNode,
+          connectionName,
+          rootConnectionName!,
+        )
       ) {
         continue
       }
@@ -1029,33 +1211,50 @@ export class PortPointPathingSolver extends BaseSolver {
       const g = this.computeG(
         currentCandidate,
         portPoint,
-        targetNodeId,
+        nextNodeId,
         connectionName,
         rootConnectionName,
       )
 
+      const distanceTraveled =
+        currentCandidate.distanceTraveled +
+        distance(currentCandidate.point, portPoint)
+
+      // Determine if this candidate has touched an off-board node
+      const hasTouchedOffBoardNode =
+        currentCandidate.hasTouchedOffBoardNode ||
+        Boolean(nextNode._offBoardConnectionId)
+
       const h = this.computeH(
-        { x: portPoint.x, y: portPoint.y },
-        targetNodeId,
+        portPoint,
+        nextNodeId,
         endNodeId,
         portPoint.z,
+        distanceTraveled,
+        hasTouchedOffBoardNode,
       )
 
-      // Random tie-breaker influences ordering without contaminating g
-      const tieBreaker =
-        this.RANDOM_COST_MAGNITUDE * seededRandom(this.iterations)()
+      const f = g + h * this.GREEDY_MULTIPLIER
 
-      const f = g + h * this.GREEDY_MULTIPLIER + tieBreaker
+      const lastMoveWasOffBoard =
+        Boolean(currentNode?._offBoardConnectionId) &&
+        Boolean(throughNode?._offBoardConnectionId)
 
       this.candidates.push({
         prevCandidate: currentCandidate,
         portPoint,
-        currentNodeId: targetNodeId,
+        currentNodeId: nextNodeId,
         point: { x: portPoint.x, y: portPoint.y },
         z: portPoint.z,
         f,
         g,
         h,
+        distanceTraveled,
+        lastMoveWasOffBoard: lastMoveWasOffBoard,
+        hasTouchedOffBoardNode:
+          hasTouchedOffBoardNode ||
+          Boolean(nextNode._offBoardConnectionId) ||
+          Boolean(currentNode?._offBoardConnectionId),
       })
     }
 

@@ -6,6 +6,7 @@ import { CapacityMeshSolver } from "../lib"
 import { convertToCircuitJson } from "lib/testing/utils/convertToCircuitJson"
 import { getDrcErrors } from "lib/testing/getDrcErrors"
 import type { SimpleRouteJson } from "lib/types"
+import { AutoroutingPipelineSolver2_PortPointPathing } from "lib/autorouter-pipelines"
 
 describe.skip("keyboard4 autorouting", () => {
   const keyboard4Srj = keyboard4 as unknown as SimpleRouteJson
@@ -14,7 +15,7 @@ describe.skip("keyboard4 autorouting", () => {
   let pcbSvg: string
 
   beforeAll(() => {
-    const solver = new CapacityMeshSolver(keyboard4Srj)
+    const solver = new AutoroutingPipelineSolver2_PortPointPathing(keyboard4Srj)
     solver.solve()
 
     if (solver.failed || !solver.solved) {

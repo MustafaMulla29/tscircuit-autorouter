@@ -39,6 +39,10 @@ import {
   InputNodeWithPortPoints,
   InputPortPoint,
 } from "../../solvers/PortPointPathingSolver/PortPointPathingSolver"
+import {
+  HyperPortPointPathingSolver,
+  HyperPortPointPathingSolverParams,
+} from "../../solvers/PortPointPathingSolver/HyperPortPointPathingSolver"
 import { CapacityMeshNodeSolver2_NodeUnderObstacle } from "../../solvers/CapacityMeshSolver/CapacityMeshNodeSolver2_NodesUnderObstacles"
 import { MultiSectionPortPointOptimizer } from "../../solvers/MultiSectionPortPointOptimizer"
 
@@ -95,7 +99,7 @@ export class AutoroutingPipelineSolver2_PortPointPathing extends BaseSolver {
   deadEndSolver?: DeadEndSolver
   traceSimplificationSolver?: TraceSimplificationSolver
   availableSegmentPointSolver?: AvailableSegmentPointSolver
-  portPointPathingSolver?: PortPointPathingSolver
+  portPointPathingSolver?: HyperPortPointPathingSolver
   multiSectionPortPointOptimizer?: MultiSectionPortPointOptimizer
   viaDiameter: number
   minTraceWidth: number
@@ -214,7 +218,7 @@ export class AutoroutingPipelineSolver2_PortPointPathing extends BaseSolver {
     ),
     definePipelineStep(
       "portPointPathingSolver",
-      PortPointPathingSolver,
+      HyperPortPointPathingSolver,
       (cms) => {
         // Convert capacity nodes and segment points to InputNodeWithPortPoints
         const inputNodes: InputNodeWithPortPoints[] = cms.capacityNodes!.map(
@@ -264,7 +268,13 @@ export class AutoroutingPipelineSolver2_PortPointPathing extends BaseSolver {
             inputNodes,
             capacityMeshNodes: cms.capacityNodes!,
             colorMap: cms.colorMap,
-          },
+            numShuffleSeeds: 200,
+            hyperParameters: {
+              NODE_PF_MAX_PENALTY: 100,
+              FORCE_OFF_BOARD_FREQUENCY: 0,
+              // MAX_ITERATIONS_PER_PATH: 10e3,
+            },
+          } as HyperPortPointPathingSolverParams,
         ]
       },
     ),
