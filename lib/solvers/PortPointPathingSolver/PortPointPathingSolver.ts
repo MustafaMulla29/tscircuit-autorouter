@@ -236,14 +236,14 @@ export class PortPointPathingSolver extends BaseSolver {
     return this.hyperParameters.GREEDY_MULTIPLIER ?? 1.3
   }
 
-  MAX_CANDIDATES_IN_MEMORY = 1000
+  MAX_CANDIDATES_IN_MEMORY = 10000
 
   get MAX_ITERATIONS_PER_PATH() {
-    return this.hyperParameters.MAX_ITERATIONS_PER_PATH ?? 1000
+    return this.hyperParameters.MAX_ITERATIONS_PER_PATH ?? 10000
   }
 
-  ITERATIONS_PER_MM_FOR_PATH = 20
-  BASE_ITERATIONS_PER_PATH = 80
+  ITERATIONS_PER_MM_FOR_PATH = 30
+  BASE_ITERATIONS_PER_PATH = 10000
 
   get MIN_ALLOWED_BOARD_SCORE() {
     return this.hyperParameters.MIN_ALLOWED_BOARD_SCORE ?? -10000
@@ -283,6 +283,7 @@ export class PortPointPathingSolver extends BaseSolver {
     nodeMemoryPfMap,
     hyperParameters,
     precomputedInitialParams,
+    fixedRoutes,
   }: {
     simpleRouteJson: SimpleRouteJson
     capacityMeshNodes: CapacityMeshNode[]
@@ -291,6 +292,8 @@ export class PortPointPathingSolver extends BaseSolver {
     nodeMemoryPfMap?: Map<CapacityMeshNodeId, number>
     hyperParameters?: Partial<PortPointPathingHyperParameters>
     precomputedInitialParams?: PrecomputedInitialParams
+    /** Pre-routed connections that should not be re-routed but should appear in results */
+    fixedRoutes?: ConnectionPathResult[]
   }) {
     super()
     this.MAX_ITERATIONS = 50e3
@@ -372,6 +375,27 @@ export class PortPointPathingSolver extends BaseSolver {
         this.getConnectionsWithNodes()
       this.connectionsWithResults = connectionsWithResults
       this.connectionNameToGoalNodeIds = connectionNameToGoalNodeIds
+    }
+
+    // Add fixed routes (pre-routed connections) to the results
+    // These are connections that should not be re-routed but should appear in visualization
+    if (fixedRoutes && fixedRoutes.length > 0) {
+      for (const fixedRoute of fixedRoutes) {
+        // Add to connectionsWithResults so they appear in visualization
+        this.connectionsWithResults.push(fixedRoute)
+
+        // Mark their port points as assigned so the solver routes around them
+        if (fixedRoute.portPoints) {
+          for (const pp of fixedRoute.portPoints) {
+            if (pp.portPointId) {
+              this.assignedPortPoints.set(pp.portPointId, {
+                connectionName: pp.connectionName,
+                rootConnectionName: pp.rootConnectionName,
+              })
+            }
+          }
+        }
+      }
     }
   }
 
@@ -743,7 +767,7 @@ export class PortPointPathingSolver extends BaseSolver {
     hasTouchedOffBoardNode?: boolean,
   ): InputPortPoint[] {
     const portPoints = this.nodePortPointsMap.get(nodeId) ?? []
-    const currentNode = this.nodeMap.get(nodeId)
+    // const currentNode = this.nodeMap.get(nodeId)
     const currentConnection =
       this.connectionsWithResults[this.currentConnectionIndex]
     const currentRootConnectionName =
@@ -1004,6 +1028,7 @@ export class PortPointPathingSolver extends BaseSolver {
       })
 
       const portPoint: PortPoint = {
+        portPointId: pp.portPointId,
         x: pp.x,
         y: pp.y,
         z: pp.z,
@@ -1133,6 +1158,12 @@ export class PortPointPathingSolver extends BaseSolver {
         return
       }
       this.solved = true
+      return
+    }
+
+    // Skip connections that already have a path (fixed routes)
+    if (nextConnection.path) {
+      this.currentConnectionIndex++
       return
     }
 

@@ -253,8 +253,8 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
             inputNodes,
             capacityMeshNodes: cms.capacityNodes!,
             colorMap: cms.colorMap,
-            numShuffleSeeds: 10000 * cms.effort,
-            minAllowedBoardScore: -1,
+            numShuffleSeeds: 100 * cms.effort,
+            // minAllowedBoardScore: -1,
             hyperParameters: {
               // 1 = 60% maximum pf (see computeSectionScore)
               // 5 = 99.3% maximum pf
@@ -262,7 +262,8 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
               // NODE_PF_MAX_PENALTY: 10,
               // RANDOM_WALK_DISTANCE: 50,
               // SHUFFLE_SEED: 275,
-              NODE_PF_FACTOR: 10000,
+              NODE_PF_FACTOR: 100,
+              NODE_PF_MAX_PENALTY: 100,
               // MIN_ALLOWED_BOARD_SCORE: -1,
               // FORCE_OFF_BOARD_FREQUENCY: 0, // 0.3,
               CENTER_OFFSET_DIST_PENALTY_FACTOR: 0,
@@ -284,34 +285,34 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
         },
       },
     ),
-    // definePipelineStep(
-    //   "multiSectionPortPointOptimizer",
-    //   MultiSectionPortPointOptimizer,
-    //   (cms) => {
-    //     const portPointSolver = cms.portPointPathingSolver!
-    //     return [
-    //       {
-    //         simpleRouteJson: cms.srjWithPointPairs!,
-    //         inputNodes: portPointSolver.inputNodes,
-    //         capacityMeshNodes: cms.capacityNodes!,
-    //         capacityMeshEdges: cms.capacityEdges!,
-    //         colorMap: cms.colorMap,
-    //         initialConnectionResults: portPointSolver.connectionsWithResults,
-    //         initialAssignedPortPoints: portPointSolver.assignedPortPoints,
-    //         initialNodeAssignedPortPoints:
-    //           portPointSolver.nodeAssignedPortPoints,
-    //       },
-    //     ]
-    //   },
-    // ),
+    definePipelineStep(
+      "multiSectionPortPointOptimizer",
+      MultiSectionPortPointOptimizer,
+      (cms) => {
+        const portPointSolver = cms.portPointPathingSolver!
+        return [
+          {
+            simpleRouteJson: cms.srjWithPointPairs!,
+            inputNodes: portPointSolver.inputNodes,
+            capacityMeshNodes: cms.capacityNodes!,
+            capacityMeshEdges: cms.capacityEdges!,
+            colorMap: cms.colorMap,
+            initialConnectionResults: portPointSolver.connectionsWithResults,
+            initialAssignedPortPoints: portPointSolver.assignedPortPoints,
+            initialNodeAssignedPortPoints:
+              portPointSolver.nodeAssignedPortPoints,
+          },
+        ]
+      },
+    ),
     definePipelineStep(
       "simpleHighDensityRouteSolver",
       SimpleHighDensitySolver,
       (cms) => [
         {
           nodePortPoints:
-            cms.portPointPathingSolver?.getNodesWithPortPoints() ??
             cms.multiSectionPortPointOptimizer?.getNodesWithPortPoints() ??
+            cms.portPointPathingSolver?.getNodesWithPortPoints() ??
             [],
           colorMap: cms.colorMap,
           viaDiameter: cms.viaDiameter,
