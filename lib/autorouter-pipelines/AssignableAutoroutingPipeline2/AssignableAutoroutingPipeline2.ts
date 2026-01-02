@@ -13,8 +13,9 @@ import type {
 import { BaseSolver } from "../../solvers/BaseSolver"
 import { CapacityMeshEdgeSolver } from "../../solvers/CapacityMeshSolver/CapacityMeshEdgeSolver"
 import { getColorMap } from "../../solvers/colors"
-import { HighDensitySolver } from "../../solvers/HighDensitySolver/HighDensitySolver"
+import { HighDensitySolver as LegacyHighDensitySolver } from "../../solvers/HighDensitySolver/HighDensitySolver"
 import { SimpleHighDensitySolver } from "./SimpleHighDensitySolver"
+import { JumperHighDensitySolver } from "./JumperHighDensitySolver"
 import { ConnectivityMap } from "circuit-json-to-connectivity-map"
 import { getConnectivityMapFromSimpleRouteJson } from "lib/utils/getConnectivityMapFromSimpleRouteJson"
 import { CapacityNodeTargetMerger } from "../../solvers/CapacityNodeTargetMerger/CapacityNodeTargetMerger"
@@ -100,8 +101,10 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
   edgeSolver?: CapacityMeshEdgeSolver
   relateNodesToOffBoardConnections?: RelateNodesToOffBoardConnectionsSolver
   colorMap: Record<string, string>
-  highDensityRouteSolver?: HighDensitySolver
+  highDensityRouteSolver?: LegacyHighDensitySolver
+  /** @deprecated Use highDensitySolver instead */
   simpleHighDensityRouteSolver?: SimpleHighDensitySolver
+  highDensitySolver?: JumperHighDensitySolver
   highDensityStitchSolver?: MultipleHighDensityRouteStitchSolver
   singleLayerNodeMerger?: SingleLayerNodeMergerSolver
   offboardPathFragmentSolver?: PortPointOffboardPathFragmentSolver
@@ -305,28 +308,37 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
         ]
       },
     ),
-    definePipelineStep(
-      "simpleHighDensityRouteSolver",
-      SimpleHighDensitySolver,
-      (cms) => [
-        {
-          nodePortPoints:
-            cms.multiSectionPortPointOptimizer?.getNodesWithPortPoints() ??
-            cms.portPointPathingSolver?.getNodesWithPortPoints() ??
-            [],
-          colorMap: cms.colorMap,
-          viaDiameter: cms.viaDiameter,
-          traceWidth: cms.minTraceWidth,
-        },
-      ],
-    ),
+    definePipelineStep("highDensitySolver", SimpleHighDensitySolver, (cms) => [
+      {
+        nodePortPoints:
+          cms.multiSectionPortPointOptimizer?.getNodesWithPortPoints() ??
+          cms.portPointPathingSolver?.getNodesWithPortPoints() ??
+          [],
+        colorMap: cms.colorMap,
+        viaDiameter: cms.viaDiameter,
+        traceWidth: cms.minTraceWidth,
+        connMap: cms.connMap,
+      },
+    ]),
+    // definePipelineStep("highDensitySolver", JumperHighDensitySolver, (cms) => [
+    //   {
+    //     nodePortPoints:
+    //       cms.multiSectionPortPointOptimizer?.getNodesWithPortPoints() ??
+    //       cms.portPointPathingSolver?.getNodesWithPortPoints() ??
+    //       [],
+    //     colorMap: cms.colorMap,
+    //     viaDiameter: cms.viaDiameter,
+    //     traceWidth: cms.minTraceWidth,
+    //     connMap: cms.connMap,
+    //   },
+    // ]),
     definePipelineStep(
       "highDensityStitchSolver",
       MultipleHighDensityRouteStitchSolver,
       (cms) => [
         {
           connections: cms.srjWithPointPairs!.connections,
-          hdRoutes: cms.simpleHighDensityRouteSolver!.routes,
+          hdRoutes: cms.highDensitySolver!.routes,
           colorMap: cms.colorMap,
           layerCount: cms.srj.layerCount,
           defaultViaDiameter: cms.viaDiameter,
@@ -340,7 +352,7 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
         {
           hdRoutes:
             cms.highDensityStitchSolver?.mergedHdRoutes ??
-            cms.simpleHighDensityRouteSolver?.routes ??
+            cms.highDensitySolver?.routes ??
             cms.highDensityRouteSolver?.routes!,
           obstacles: cms.srj.obstacles,
           connMap: cms.connMap,
@@ -476,6 +488,7 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
     const portPointPathingViz = this.portPointPathingSolver?.visualize()
     const multiSectionOptViz = this.multiSectionPortPointOptimizer?.visualize()
     const highDensityViz = this.highDensityRouteSolver?.visualize()
+    const newHighDensityViz = this.highDensitySolver?.visualize()
     const simpleHighDensityViz = this.simpleHighDensityRouteSolver?.visualize()
     const highDensityStitchViz = this.highDensityStitchSolver?.visualize()
     const traceSimplificationViz = this.traceSimplificationSolver?.visualize()
@@ -562,6 +575,9 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
       portPointPathingViz,
       multiSectionOptViz,
       highDensityViz ? combineVisualizations(problemViz, highDensityViz) : null,
+      newHighDensityViz
+        ? combineVisualizations(problemViz, newHighDensityViz)
+        : null,
       simpleHighDensityViz
         ? combineVisualizations(problemViz, simpleHighDensityViz)
         : null,
@@ -591,6 +607,7 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
    */
   preview(): GraphicsObject {
     const hdRoutes =
+      this.highDensitySolver?.routes ??
       this.simpleHighDensityRouteSolver?.routes ??
       this.highDensityRouteSolver?.routes
     if (hdRoutes) {
@@ -639,6 +656,7 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
       this.traceKeepoutSolver?.redrawnHdRoutes ??
       this.traceSimplificationSolver?.simplifiedHdRoutes ??
       this.highDensityStitchSolver?.mergedHdRoutes ??
+      this.highDensitySolver?.routes ??
       this.simpleHighDensityRouteSolver?.routes ??
       this.highDensityRouteSolver?.routes!
     )
@@ -679,7 +697,9 @@ export class AssignableAutoroutingPipeline2 extends BaseSolver {
   getOutputSimplifiedPcbTraces(): SimplifiedPcbTraces {
     if (
       !this.solved ||
-      (!this.highDensityRouteSolver && !this.simpleHighDensityRouteSolver)
+      (!this.highDensityRouteSolver &&
+        !this.simpleHighDensityRouteSolver &&
+        !this.highDensitySolver)
     ) {
       throw new Error("Cannot get output before solving is complete")
     }

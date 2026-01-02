@@ -5,6 +5,16 @@ import {
 } from "graphics-debug/react"
 import { BaseSolver } from "lib/solvers/BaseSolver"
 import { combineVisualizations } from "lib/utils/combineVisualizations"
+import {
+  Menubar,
+  MenubarContent,
+  MenubarItem,
+  MenubarMenu,
+  MenubarSub,
+  MenubarSubContent,
+  MenubarSubTrigger,
+  MenubarTrigger,
+} from "lib/testing/ui/menubar"
 
 interface GenericSolverDebuggerProps {
   createSolver: () => BaseSolver
@@ -12,16 +22,24 @@ interface GenericSolverDebuggerProps {
   onSolverStarted?: (solver: BaseSolver) => void
   onSolverCompleted?: (solver: BaseSolver) => void
   showDeepestVisualizationInitial?: boolean
+  autoStepOnce?: boolean
 }
 
 export const GenericSolverDebugger = ({
   createSolver,
   animationSpeed = 10,
+  autoStepOnce = false,
   onSolverStarted,
   onSolverCompleted,
   showDeepestVisualizationInitial = false,
 }: GenericSolverDebuggerProps) => {
-  const [mainSolver, setMainSolver] = useState<BaseSolver>(() => createSolver())
+  const [mainSolver, setMainSolver] = useState<BaseSolver>(() => {
+    const solver = createSolver()
+    if (autoStepOnce) {
+      solver.step()
+    }
+    return solver
+  })
   const [previewMode, setPreviewMode] = useState(false)
   const [objectSelectionEnabled, setObjectSelectionEnabled] = useState(false)
   const [forcedUpdates, setForceUpdate] = useState(0)
@@ -72,6 +90,9 @@ export const GenericSolverDebugger = ({
   // Reset solver
   const resetSolver = () => {
     setMainSolver(createSolver())
+    if (autoStepOnce) {
+      mainSolver.step()
+    }
     setSelectedSolverKey("main")
     setSelectedStatKey(null)
   }
@@ -313,6 +334,41 @@ export const GenericSolverDebugger = ({
     deepestActiveSubSolver = deepestActiveSubSolver.activeSubSolver
   }
 
+  // Get the solver chain for the Debug menu
+  const solverChain = useMemo(() => {
+    const chain: BaseSolver[] = [mainSolver]
+    let current = mainSolver.activeSubSolver
+    while (current) {
+      chain.push(current)
+      current = current.activeSubSolver
+    }
+    return chain
+  }, [mainSolver, forcedUpdates])
+
+  // Download solver input for a specific solver
+  const downloadSolverInput = (solver: BaseSolver) => {
+    let params: any
+    try {
+      params = solver.getConstructorParams()
+    } catch (e: any) {
+      window.alert(`Unable to get constructor params: ${e.toString()}`)
+      return
+    }
+
+    const paramsJson = JSON.stringify(params, null, 2)
+    const blob = new Blob([paramsJson], {
+      type: "application/json",
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.download = `${solver.constructor.name}_input.json`
+    a.href = url
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   // Safely get visualization
   const visualization = useMemo(() => {
     try {
@@ -361,6 +417,27 @@ export const GenericSolverDebugger = ({
 
   return (
     <div className="p-4">
+      <Menubar className="rounded-none border-b border-none px-2 lg:px-4 mb-4 light">
+        <MenubarMenu>
+          <MenubarTrigger>Debug</MenubarTrigger>
+          <MenubarContent>
+            <MenubarSub>
+              <MenubarSubTrigger>Download Solver Input</MenubarSubTrigger>
+              <MenubarSubContent>
+                {solverChain.map((solver, index) => (
+                  <MenubarItem
+                    key={index}
+                    onClick={() => downloadSolverInput(solver)}
+                  >
+                    {index === 0 ? "Main: " : ""}
+                    {solver.constructor.name}
+                  </MenubarItem>
+                ))}
+              </MenubarSubContent>
+            </MenubarSub>
+          </MenubarContent>
+        </MenubarMenu>
+      </Menubar>
       <div className="flex gap-2 mb-4">
         <button
           className="border rounded-md p-2 hover:bg-gray-100"
