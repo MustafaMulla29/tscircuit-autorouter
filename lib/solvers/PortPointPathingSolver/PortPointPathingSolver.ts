@@ -51,6 +51,9 @@ export interface PortPointPathingHyperParameters {
   RIPPING_PF_THRESHOLD?: number
   MAX_RIPS?: number
   RANDOM_RIP_FRACTION?: number
+
+  /** When enabled, use jumper-based pf calculation for same-layer crossings on single layer nodes */
+  JUMPER_PF_FN_ENABLED?: boolean
 }
 
 /**
@@ -266,6 +269,13 @@ export class PortPointPathingSolver extends BaseSolver {
     return this.hyperParameters.RANDOM_RIP_FRACTION ?? 0
   }
 
+  get JUMPER_PF_FN_ENABLED() {
+    return this.hyperParameters.JUMPER_PF_FN_ENABLED ?? false
+  }
+
+  /** Number of jumpers that can fit per mm² of node area */
+  jumpersPerMmSquared = 0.1
+
   /** Tracks which connections have been test-ripped for each node to avoid retesting */
   testedRipConnections: Map<CapacityMeshNodeId, Set<string>> = new Map()
 
@@ -297,7 +307,7 @@ export class PortPointPathingSolver extends BaseSolver {
   capacityMeshNodeMap: Map<CapacityMeshNodeId, CapacityMeshNode>
 
   /** Heuristic scaling: an estimate of "node pitch" used to estimate remaining hops */
-  avgNodePitch = 1
+  avgNodePitch: number
 
   /** Whether the current connection should be forced to route off-board */
   currentConnectionShouldRouteOffBoard = false
@@ -310,28 +320,32 @@ export class PortPointPathingSolver extends BaseSolver {
   /** Cache of base node cost (cost of node in current committed state) */
   private baseNodeCostCache = new Map<CapacityMeshNodeId, number>()
 
-  constructor({
-    simpleRouteJson,
-    inputNodes,
-    capacityMeshNodes,
-    colorMap,
-    nodeMemoryPfMap,
-    hyperParameters,
-    precomputedInitialParams,
-    fixedRoutes,
-  }: {
-    simpleRouteJson: SimpleRouteJson
-    capacityMeshNodes: CapacityMeshNode[]
-    inputNodes: InputNodeWithPortPoints[]
-    colorMap?: Record<string, string>
-    nodeMemoryPfMap?: Map<CapacityMeshNodeId, number>
-    hyperParameters?: Partial<PortPointPathingHyperParameters>
-    precomputedInitialParams?: PrecomputedInitialParams
-    /** Pre-routed connections that should not be re-routed but should appear in results */
-    fixedRoutes?: ConnectionPathResult[]
-  }) {
+  constructor(
+    public input: {
+      simpleRouteJson: SimpleRouteJson
+      capacityMeshNodes: CapacityMeshNode[]
+      inputNodes: InputNodeWithPortPoints[]
+      colorMap?: Record<string, string>
+      nodeMemoryPfMap?: Map<CapacityMeshNodeId, number>
+      hyperParameters?: Partial<PortPointPathingHyperParameters>
+      precomputedInitialParams?: PrecomputedInitialParams
+      /** Pre-routed connections that should not be re-routed but should appear in results */
+      fixedRoutes?: ConnectionPathResult[]
+    },
+  ) {
     super()
-    this.MAX_ITERATIONS = 100e3
+    const {
+      simpleRouteJson,
+      capacityMeshNodes,
+      inputNodes,
+      colorMap,
+      nodeMemoryPfMap,
+      hyperParameters,
+      precomputedInitialParams,
+      fixedRoutes,
+    } = input
+    this.input = structuredClone(input)
+    this.MAX_ITERATIONS = 100e6
     this.simpleRouteJson = simpleRouteJson
     this.inputNodes = inputNodes
     this.colorMap = colorMap ?? {}
@@ -444,6 +458,10 @@ export class PortPointPathingSolver extends BaseSolver {
       }
     }
     this.totalConnectionCount = this.connectionsWithResults.length
+  }
+
+  getConstructorParams() {
+    return this.input
   }
 
   private clearCostCaches() {
@@ -570,6 +588,14 @@ export class PortPointPathingSolver extends BaseSolver {
       additionalPortPoints,
     )
     const crossings = getIntraNodeCrossingsUsingCircle(nodeWithPortPoints)
+
+    // Use jumper-based pf calculation for single layer nodes when enabled
+    if (this.JUMPER_PF_FN_ENABLED && node.availableZ.length === 1) {
+      const nodeArea = node.width * node.height
+      const jumpersWeCanFitInNode = nodeArea * this.jumpersPerMmSquared
+      const estimatedRequiredJumpers = crossings.numSameLayerCrossings
+      return Math.min(1, estimatedRequiredJumpers / jumpersWeCanFitInNode)
+    }
 
     return calculateNodeProbabilityOfFailure(
       this.capacityMeshNodeMap.get(node.capacityMeshNodeId)!,
@@ -1445,22 +1471,24 @@ export class PortPointPathingSolver extends BaseSolver {
       )
       if (!nextNodeId) continue
 
+      // HACK: Disable node cycles because stitch solver doesn't handle them
+      if (this.isNodeInPathChain(currentCandidate, nextNodeId)) continue
+      // if (currentCandidate.currentNodeId === nextNodeId) continue
+      // if (currentCandidate.prevCandidate?.currentNodeId === nextNodeId) continue
+
       const throughNodeId =
         "throughNodeId" in portPoint
           ? (portPoint as { throughNodeId?: CapacityMeshNodeId }).throughNodeId
           : undefined
       const throughNode = throughNodeId ? this.nodeMap.get(throughNodeId) : null
 
-      // Prevent throughNodeId cycles (off-board improvement)
-      if (
-        throughNodeId &&
-        this.isNodeInPathChain(currentCandidate, throughNodeId)
-      ) {
-        continue
-      }
-
-      // Prevent node cycles (keeps delta-pf accounting correct)
-      if (this.isNodeInPathChain(currentCandidate, nextNodeId)) continue
+      // // Prevent throughNodeId cycles (off-board improvement)
+      // if (
+      //   throughNodeId &&
+      //   this.isNodeInPathChain(currentCandidate, throughNodeId)
+      // ) {
+      //   continue
+      // }
 
       const nextNode = this.nodeMap.get(nextNodeId)
       if (!nextNode) continue

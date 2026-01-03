@@ -374,7 +374,7 @@ export function visualizePointPathSolver(
 
     const sortedCandidates = [...solver.candidates]
       .sort((a, b) => a.f - b.f)
-      .slice(0, 50)
+      .slice(0, 1)
 
     for (const candidate of sortedCandidates) {
       const candidatePath: Array<{

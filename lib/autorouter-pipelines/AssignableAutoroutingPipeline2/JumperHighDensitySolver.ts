@@ -6,7 +6,7 @@ import type {
 import type { GraphicsObject } from "graphics-debug"
 import { BaseSolver } from "../../solvers/BaseSolver"
 import { SimpleHighDensitySolver } from "./SimpleHighDensitySolver"
-import { IntraNodeSolverWithJumpers } from "../../solvers/HighDensitySolver/IntraNodeSolverWithJumpers"
+import { HyperIntraNodeSolverWithJumpers } from "../../solvers/HighDensitySolver/HyperIntraNodeSolverWithJumpers"
 import { getIntraNodeCrossings } from "../../utils/getIntraNodeCrossings"
 import { safeTransparentize } from "../../solvers/colors"
 import { mergeRouteSegments } from "lib/utils/mergeRouteSegments"
@@ -47,7 +47,6 @@ interface NodeAnalysis {
   node: NodeWithPortPoints
   hasCrossings: boolean
   numSameLayerCrossings: number
-  isSingleLayer: boolean
 }
 
 /**
@@ -60,9 +59,7 @@ interface NodeAnalysis {
 export class JumperHighDensitySolver extends BaseSolver {
   allNodes: NodeWithPortPoints[]
   nodeAnalyses: NodeAnalysis[]
-  routes: (HighDensityIntraNodeRoute & {
-    jumpers?: HighDensityIntraNodeRouteWithJumpers["jumpers"]
-  })[]
+  routes: HighDensityIntraNodeRoute[]
   colorMap: Record<string, string>
   traceWidth: number
   viaDiameter: number
@@ -75,7 +72,7 @@ export class JumperHighDensitySolver extends BaseSolver {
 
   // Sub-solvers
   simpleHighDensitySolver?: SimpleHighDensitySolver
-  jumperSolvers: IntraNodeSolverWithJumpers[]
+  jumperSolvers: HyperIntraNodeSolverWithJumpers[]
   currentJumperSolverIndex: number
 
   // State
@@ -117,7 +114,7 @@ export class JumperHighDensitySolver extends BaseSolver {
 
     // Calculate max iterations
     const simpleIterations = this.nodesWithoutCrossings.length * 10 + 1
-    const jumperIterations = this.nodesWithCrossings.length * 10000
+    const jumperIterations = this.nodesWithCrossings.length * 100000
     this.MAX_ITERATIONS = simpleIterations + jumperIterations + 100
   }
 
@@ -128,21 +125,16 @@ export class JumperHighDensitySolver extends BaseSolver {
     for (const node of this.allNodes) {
       const crossings = getIntraNodeCrossingsUsingCircle(node)
 
-      // Check if all port points are on the same layer (single-layer node)
-      const layers = new Set(node.portPoints.map((p) => p.z))
-      const isSingleLayer = layers.size === 1
-
       const analysis: NodeAnalysis = {
         node,
         hasCrossings: crossings.numSameLayerCrossings > 0,
         numSameLayerCrossings: crossings.numSameLayerCrossings,
-        isSingleLayer,
       }
 
       this.nodeAnalyses.push(analysis)
 
       // Route to appropriate solver
-      if (crossings.numSameLayerCrossings > 0 && isSingleLayer) {
+      if (crossings.numSameLayerCrossings > 0) {
         // Single-layer with crossings -> use jumpers
         this.nodesWithCrossings.push(node)
       } else {
@@ -225,7 +217,7 @@ export class JumperHighDensitySolver extends BaseSolver {
 
   _initializeJumperSolvers() {
     for (const node of this.nodesWithCrossings) {
-      const solver = new IntraNodeSolverWithJumpers({
+      const solver = new HyperIntraNodeSolverWithJumpers({
         nodeWithPortPoints: node,
         colorMap: this.colorMap,
         connMap: this.connMap,
@@ -270,7 +262,7 @@ export class JumperHighDensitySolver extends BaseSolver {
         this.solved = true
       }
     } else if (currentSolver.failed) {
-      this.error = `IntraNodeSolverWithJumpers failed for node: ${currentSolver.nodeWithPortPoints.capacityMeshNodeId}: ${currentSolver.error}`
+      this.error = `HyperIntraNodeSolverWithJumpers failed for node: ${currentSolver.nodeWithPortPoints.capacityMeshNodeId}: ${currentSolver.error}`
       this.failed = true
     }
   }
@@ -376,11 +368,20 @@ export class JumperHighDensitySolver extends BaseSolver {
         for (const jumper of route.jumpers) {
           const color = this.colorMap[route.connectionName] ?? "gray"
 
+          // Determine jumper orientation to rotate pad dimensions
+          const dx = jumper.end.x - jumper.start.x
+          const dy = jumper.end.y - jumper.start.y
+          const isHorizontal = Math.abs(dx) > Math.abs(dy)
+          const padLength = 0.8
+          const padWidth = 0.95
+          const rectWidth = isHorizontal ? padLength : padWidth
+          const rectHeight = isHorizontal ? padWidth : padLength
+
           // Draw start pad
           graphics.rects!.push({
             center: jumper.start,
-            width: 0.5,
-            height: 1.25,
+            width: rectWidth,
+            height: rectHeight,
             fill: safeTransparentize(color, 0.5),
             stroke: "rgba(0, 0, 0, 0.5)",
             layer: "jumper",
@@ -389,8 +390,8 @@ export class JumperHighDensitySolver extends BaseSolver {
           // Draw end pad
           graphics.rects!.push({
             center: jumper.end,
-            width: 0.5,
-            height: 1.25,
+            width: rectWidth,
+            height: rectHeight,
             fill: safeTransparentize(color, 0.5),
             stroke: "rgba(0, 0, 0, 0.5)",
             layer: "jumper",
@@ -400,7 +401,7 @@ export class JumperHighDensitySolver extends BaseSolver {
           graphics.lines!.push({
             points: [jumper.start, jumper.end],
             strokeColor: "rgba(100, 100, 100, 0.8)",
-            strokeWidth: 0.375,
+            strokeWidth: padWidth * 0.3,
             layer: "jumper-body",
           })
         }
@@ -427,9 +428,12 @@ export class JumperHighDensitySolver extends BaseSolver {
         stroke: analysis.hasCrossings
           ? "rgba(255, 150, 0, 0.5)"
           : "rgba(0, 150, 0, 0.5)",
-        label: analysis.hasCrossings
-          ? `crossings: ${analysis.numSameLayerCrossings}`
-          : "no crossings",
+        label: [
+          node.capacityMeshNodeId,
+          analysis.hasCrossings
+            ? `crossings: ${analysis.numSameLayerCrossings}`
+            : "no crossings",
+        ].join("\n"),
       })
     }
 
