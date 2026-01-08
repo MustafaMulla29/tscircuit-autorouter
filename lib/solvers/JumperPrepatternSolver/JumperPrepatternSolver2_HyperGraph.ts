@@ -6,6 +6,7 @@ import type {
   NodeWithPortPoints,
   PortPoint,
 } from "../../types/high-density-types"
+import type { Jumper as SrjJumper, Obstacle } from "../../types/srj-types"
 import { safeTransparentize } from "../colors"
 import { ConnectivityMap } from "circuit-json-to-connectivity-map"
 import {
@@ -16,7 +17,13 @@ import {
   JumperGraphSolver,
   generateJumperX4Grid,
   createGraphWithConnectionsFromBaseGraph,
+  type JRegion,
 } from "@tscircuit/hypergraph"
+import { areSegmentsCollinear } from "./areSegmentsCollinear"
+import { getCollinearOverlapInfo } from "./getCollinearOverlapInfo"
+import { computeOffsetMidpoint } from "./computeOffsetMidpoint"
+
+export type Point2D = { x: number; y: number }
 
 export type HyperGraphPatternType =
   | "single_1206x4"
@@ -64,8 +71,18 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
     maxY: number
   } | null = null
 
+  // All jumper positions from the baseGraph (includes padRegions for obstacle generation)
+  jumperLocations: Array<{
+    center: { x: number; y: number }
+    orientation: "vertical" | "horizontal"
+    padRegions: JRegion[]
+  }> = []
+
   // Output
   solvedRoutes: HighDensityIntraNodeRouteWithJumpers[] = []
+
+  // SRJ Jumpers with obstacles (populated after solving)
+  jumpers: SrjJumper[] = []
 
   constructor(params: JumperPrepatternSolver2Params) {
     super()
@@ -145,6 +162,7 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
       marginY: 1.2,
       outerPaddingX: 0.4,
       outerPaddingY: 0.4,
+      // parallelTracesUnderJumperCount: 2,
       innerColChannelPointCount: 3,
       innerRowChannelPointCount: 3,
       outerChannelXPointCount: 5,
@@ -153,6 +171,14 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
       orientation,
       bounds: nodeBounds,
     })
+
+    // Store all jumper positions from the baseGraph (including padRegions for obstacle generation)
+    this.jumperLocations =
+      baseGraph.jumperLocations?.map((loc) => ({
+        center: loc.center,
+        orientation: loc.orientation,
+        padRegions: loc.padRegions,
+      })) ?? []
 
     // Build connections from port points
     // Group port points by connection name
@@ -224,6 +250,7 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
 
     if (this.jumperGraphSolver.solved) {
       this._processResults()
+      this._addMidpointsForCollinearOverlaps()
       this.solved = true
     } else if (this.jumperGraphSolver.failed) {
       this.error = this.jumperGraphSolver.error
@@ -242,12 +269,24 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
       const connectionId = solvedRoute.connection.connectionId
 
       // Extract route points from the solved path
-      const routePoints: Array<{ x: number; y: number; z: number }> = []
+      const routePoints: Array<{
+        x: number
+        y: number
+        z: number
+        insideJumperPad?: boolean
+      }> = []
       const jumpers: Jumper[] = []
 
       for (const candidate of solvedRoute.path) {
-        const port = candidate.port as any
-        const point = { x: port.d.x, y: port.d.y, z: 0 }
+        const port = candidate.port
+        const point = {
+          x: port.d.x,
+          y: port.d.y,
+          z: 0,
+          insideJumperPad: Boolean(
+            port.region1?.d.isPad || port.region2?.d.isPad,
+          ),
+        }
         routePoints.push(point)
 
         // Check if we crossed through a jumper (lastRegion is a throughjumper)
@@ -259,18 +298,30 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
           usedThroughJumpers.add(region.regionId)
 
           // Use the throughjumper region's bounds to get the correct pad positions
-          // For 1206x4 horizontal jumpers:
-          // - minX is left pad center X, maxX is right pad center X
-          // - center.y is the row's Y position
+          // Determine orientation from bounds - if width > height, it's horizontal
           const bounds = region.d.bounds
-          const centerY = region.d.center.y
+          const center = region.d.center
+          const boundsWidth = bounds.maxX - bounds.minX
+          const boundsHeight = bounds.maxY - bounds.minY
+          const isHorizontal = boundsWidth > boundsHeight
 
-          jumpers.push({
-            route_type: "jumper",
-            start: { x: bounds.minX, y: centerY },
-            end: { x: bounds.maxX, y: centerY },
-            footprint: "1206x4_pair",
-          })
+          if (isHorizontal) {
+            // Horizontal jumper: pads are on left (minX) and right (maxX), same Y
+            jumpers.push({
+              route_type: "jumper",
+              start: { x: bounds.minX, y: center.y },
+              end: { x: bounds.maxX, y: center.y },
+              footprint: "1206x4_pair",
+            })
+          } else {
+            // Vertical jumper: pads are on bottom (minY) and top (maxY), same X
+            jumpers.push({
+              route_type: "jumper",
+              start: { x: center.x, y: bounds.minY },
+              end: { x: center.x, y: bounds.maxY },
+              footprint: "1206x4_pair",
+            })
+          }
         }
       }
 
@@ -289,8 +340,217 @@ export class JumperPrepatternSolver2_HyperGraph extends BaseSolver {
     }
   }
 
+  /**
+   * Post-process routes to add offset midpoints for collinear overlapping segments.
+   *
+   * When two segments are collinear and overlap (arranged as A-C-D-B where AB
+   * is one segment and CD is another), the outer segment (AB) needs a midpoint
+   * pushed to the side to hint to the force-directed graph that it should route
+   * around the inner segment.
+   *
+   * This handles both:
+   * 1. Segments from different connections that overlap
+   * 2. Segments from the SAME connection that overlap (when a route doubles back)
+   */
+  private _addMidpointsForCollinearOverlaps() {
+    // Offset distance for the midpoint (mm) - should be enough to hint direction
+    const OFFSET_DISTANCE = 0.5
+
+    // Collect all segments from all routes
+    type RouteSegment = {
+      routeIndex: number
+      segmentIndex: number
+      start: Point2D
+      end: Point2D
+      connectionName: string
+      isInsideJumperPad: boolean
+    }
+
+    const allSegments: RouteSegment[] = []
+
+    for (let routeIdx = 0; routeIdx < this.solvedRoutes.length; routeIdx++) {
+      const route = this.solvedRoutes[routeIdx]
+      for (let i = 0; i < route.route.length - 1; i++) {
+        const p1 = route.route[i] as {
+          x: number
+          y: number
+          z: number
+          insideJumperPad?: boolean
+        }
+        const p2 = route.route[i + 1] as {
+          x: number
+          y: number
+          z: number
+          insideJumperPad?: boolean
+        }
+
+        // Track whether this segment is inside jumper pads
+        const isInsideJumperPad = Boolean(
+          p1.insideJumperPad && p2.insideJumperPad,
+        )
+
+        allSegments.push({
+          routeIndex: routeIdx,
+          segmentIndex: i,
+          start: { x: p1.x, y: p1.y },
+          end: { x: p2.x, y: p2.y },
+          connectionName: route.connectionName,
+          isInsideJumperPad,
+        })
+      }
+    }
+
+    // Track which routes need midpoint insertions (routeIndex -> list of insertions)
+    // Use a Set to track unique insertions by segment index to avoid duplicates
+    const insertions: Map<
+      number,
+      Map<number, { afterSegmentIndex: number; point: Point2D & { z: number } }>
+    > = new Map()
+
+    // Compare all pairs of segments (including from the same route!)
+    for (let i = 0; i < allSegments.length; i++) {
+      for (let j = i + 1; j < allSegments.length; j++) {
+        const seg1 = allSegments[i]
+        const seg2 = allSegments[j]
+
+        // For same-route segments, skip adjacent segments (they share an endpoint)
+        if (
+          seg1.routeIndex === seg2.routeIndex &&
+          Math.abs(seg1.segmentIndex - seg2.segmentIndex) <= 1
+        ) {
+          continue
+        }
+
+        // Check if segments are collinear
+        if (!areSegmentsCollinear(seg1.start, seg1.end, seg2.start, seg2.end)) {
+          continue
+        }
+
+        // Check if they overlap and get info about which is outer
+        const overlapInfo = getCollinearOverlapInfo(
+          seg1.start,
+          seg1.end,
+          seg2.start,
+          seg2.end,
+        )
+
+        if (!overlapInfo) continue
+
+        // Determine which route/segment is the outer one
+        const outerSeg = overlapInfo.outerSegment === 1 ? seg1 : seg2
+
+        // Compute offset midpoint for the outer segment
+        const offsetMidpoint = computeOffsetMidpoint(
+          overlapInfo.outerStart,
+          overlapInfo.outerEnd,
+          OFFSET_DISTANCE,
+        )
+
+        // Add to insertions for the outer route (using Map to dedupe by segment index)
+        if (!insertions.has(outerSeg.routeIndex)) {
+          insertions.set(outerSeg.routeIndex, new Map())
+        }
+        const routeInsertions = insertions.get(outerSeg.routeIndex)!
+        // Only add if we haven't already added an insertion for this segment
+        if (!routeInsertions.has(outerSeg.segmentIndex)) {
+          routeInsertions.set(outerSeg.segmentIndex, {
+            afterSegmentIndex: outerSeg.segmentIndex,
+            point: { ...offsetMidpoint, z: 0 },
+          })
+        }
+      }
+    }
+
+    // Apply insertions to routes (in reverse order to preserve indices)
+    for (const [routeIndex, routeInsertionsMap] of insertions) {
+      // Convert map to array and sort by segment index descending
+      const routeInsertions = Array.from(routeInsertionsMap.values())
+      routeInsertions.sort((a, b) => b.afterSegmentIndex - a.afterSegmentIndex)
+
+      const route = this.solvedRoutes[routeIndex]
+      for (const insertion of routeInsertions) {
+        // Insert the midpoint after the start of the segment (at index + 1)
+        route.route.splice(insertion.afterSegmentIndex + 1, 0, insertion.point)
+      }
+    }
+  }
+
   getOutput(): HighDensityIntraNodeRouteWithJumpers[] {
     return this.solvedRoutes
+  }
+
+  /**
+   * Returns all jumpers from the baseGraph as SRJ Jumper objects.
+   * The pads have connectedTo set based on which routes use each jumper.
+   * Must be called after the solver is solved.
+   */
+  getOutputJumpers(): SrjJumper[] {
+    if (this.jumpers.length > 0) {
+      return this.jumpers
+    }
+
+    // Build a map of jumper center -> connection names that use it
+    // by examining the solved routes' jumpers
+    const jumperUsageMap = new Map<string, string[]>()
+    for (const route of this.solvedRoutes) {
+      for (const jumper of route.jumpers) {
+        const centerX = (jumper.start.x + jumper.end.x) / 2
+        const centerY = (jumper.start.y + jumper.end.y) / 2
+        const key = `${centerX.toFixed(3)},${centerY.toFixed(3)}`
+
+        const connectedTo = jumperUsageMap.get(key) ?? []
+        // Add both connectionName and rootConnectionName if available
+        if (
+          route.rootConnectionName &&
+          !connectedTo.includes(route.rootConnectionName)
+        ) {
+          connectedTo.push(route.rootConnectionName)
+        }
+        if (!connectedTo.includes(route.connectionName)) {
+          connectedTo.push(route.connectionName)
+        }
+        jumperUsageMap.set(key, connectedTo)
+      }
+    }
+
+    // Convert all jumperLocations to SRJ Jumpers
+    const dims = JUMPER_DIMENSIONS["1206x4_pair"]
+
+    for (const jumperLoc of this.jumperLocations) {
+      const isHorizontal = jumperLoc.orientation === "horizontal"
+      const key = `${jumperLoc.center.x.toFixed(3)},${jumperLoc.center.y.toFixed(3)}`
+      const connectedTo = jumperUsageMap.get(key) ?? []
+
+      // Get pad obstacles from padRegions
+      const pads: Obstacle[] = jumperLoc.padRegions.map((padRegion) => {
+        const bounds = padRegion.d.bounds
+        const padCenter = padRegion.d.center
+        const padWidth = bounds.maxX - bounds.minX
+        const padHeight = bounds.maxY - bounds.minY
+
+        return {
+          type: "rect" as const,
+          center: padCenter,
+          width: padWidth,
+          height: padHeight,
+          layers: ["top"],
+          connectedTo: [...connectedTo],
+        }
+      })
+
+      const srjJumper: SrjJumper = {
+        jumper_footprint: "1206x4",
+        center: jumperLoc.center,
+        orientation: jumperLoc.orientation,
+        width: isHorizontal ? dims.length : dims.width,
+        height: isHorizontal ? dims.width : dims.length,
+        pads,
+      }
+
+      this.jumpers.push(srjJumper)
+    }
+
+    return this.jumpers
   }
 
   visualize(): GraphicsObject {

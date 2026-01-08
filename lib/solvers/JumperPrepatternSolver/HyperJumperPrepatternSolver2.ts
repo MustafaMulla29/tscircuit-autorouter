@@ -3,6 +3,7 @@ import type {
   HighDensityIntraNodeRouteWithJumpers,
   NodeWithPortPoints,
 } from "../../types/high-density-types"
+import type { Jumper as SrjJumper } from "../../types/srj-types"
 import {
   HyperParameterSupervisorSolver,
   SupervisedSolver,
@@ -48,6 +49,8 @@ export class HyperJumperPrepatternSolver2 extends HyperParameterSupervisorSolver
 
   // Output
   solvedRoutes: HighDensityIntraNodeRouteWithJumpers[] = []
+  // All jumpers from the winning solver (SRJ format with connectedTo populated)
+  jumpers: SrjJumper[] = []
 
   constructor(params: HyperJumperPrepatternSolver2Params) {
     super()
@@ -140,10 +143,15 @@ export class HyperJumperPrepatternSolver2 extends HyperParameterSupervisorSolver
 
   onSolve(solver: SupervisedSolver<JumperPrepatternSolver2_HyperGraph>) {
     this.solvedRoutes = solver.solver.solvedRoutes
+    this.jumpers = solver.solver.getOutputJumpers()
   }
 
   getOutput(): HighDensityIntraNodeRouteWithJumpers[] {
     return this.solvedRoutes
+  }
+
+  getOutputJumpers(): SrjJumper[] {
+    return this.jumpers
   }
 
   visualize(): GraphicsObject {

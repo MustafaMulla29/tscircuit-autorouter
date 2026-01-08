@@ -16,6 +16,7 @@ import { ConnectivityMap } from "circuit-json-to-connectivity-map"
 import { HighDensityHyperParameters } from "../../solvers/HighDensitySolver/HighDensityHyperParameters"
 import { getIntraNodeCrossingsUsingCircle } from "lib/utils/getIntraNodeCrossingsUsingCircle"
 import { JUMPER_DIMENSIONS } from "../../utils/jumperSizes"
+import type { Jumper as SrjJumper } from "../../types/srj-types"
 
 /**
  * A unified route type that can represent both regular routes (with vias)
@@ -82,6 +83,9 @@ export class JumperHighDensitySolver extends BaseSolver {
 
   // State
   phase: "analyzing" | "simple" | "jumpers" | "done"
+
+  // All jumpers collected from jumper solvers (SRJ format with connectedTo populated)
+  jumpers: SrjJumper[] = []
 
   constructor({
     nodePortPoints,
@@ -271,6 +275,9 @@ export class JumperHighDensitySolver extends BaseSolver {
         this.routes.push(convertJumperRouteToStandard(jumperRoute))
       }
 
+      // Collect all jumpers from the solver (SRJ format with connectedTo populated)
+      this.jumpers.push(...currentSolver.getOutputJumpers())
+
       this.currentJumperSolverIndex++
 
       if (this.currentJumperSolverIndex >= this.jumperSolvers.length) {
@@ -325,6 +332,16 @@ export class JumperHighDensitySolver extends BaseSolver {
       connMap: this.connMap,
       hyperParameters: this.hyperParameters,
     }
+  }
+
+  /**
+   * Returns ALL jumpers collected from the jumper solvers.
+   * These include all jumpers placed in the grid (from baseGraph.jumperLocations),
+   * not just the ones used by routes. The pads have connectedTo set based on
+   * which routes use each jumper.
+   */
+  getOutputJumpers(): SrjJumper[] {
+    return this.jumpers
   }
 
   visualize(): GraphicsObject {

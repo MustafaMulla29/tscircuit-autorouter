@@ -35,12 +35,21 @@ export type HighDensityIntraNodeRoute = {
   rootConnectionName?: string
   traceThickness: number
   viaDiameter: number
-  route: Array<{ x: number; y: number; z: number }>
+  route: Array<{ x: number; y: number; z: number; insideJumperPad?: boolean }>
   vias: Array<{ x: number; y: number }>
   jumpers?: Jumper[]
 }
 
 export type HighDensityRoute = HighDensityIntraNodeRoute
+
+/**
+ * Extended HD route with segment ordering information for proper stitching.
+ * segmentOrder indicates the position of this route segment in the overall
+ * path from start to end (0 = first segment, 1 = second, etc.)
+ */
+export type HighDensityRouteWithOrder = HighDensityIntraNodeRoute & {
+  segmentOrder: number
+}
 
 /**
  * A jumper component used to allow traces to cross on single-layer PCBs.
