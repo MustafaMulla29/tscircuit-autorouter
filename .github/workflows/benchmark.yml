@@ -148,9 +148,9 @@ jobs:
           for SOLVER in $SOLVERS; do
             echo "Starting benchmark for $SOLVER"
             (
-              echo "=== Benchmarking $SOLVER ===" > /tmp/benchmark_${SOLVER}.txt
-              autorouting-dataset-runner benchmark-solver.ts $SOLVER $LIMIT_FLAG >> /tmp/benchmark_${SOLVER}.txt 2>&1 || true
-            ) &
+              echo "=== Benchmarking $SOLVER ==="
+              autorouting-dataset-runner benchmark-solver.ts $SOLVER $LIMIT_FLAG 2>&1 || true
+            ) > >(tee /tmp/benchmark_${SOLVER}.txt) 2>&1 &
             PIDS="$PIDS $!"
           done
 
