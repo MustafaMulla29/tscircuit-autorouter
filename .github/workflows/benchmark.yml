@@ -206,6 +206,42 @@ jobs:
           path: benchmark-rows/
           pattern: benchmark-row-*
 
+      - name: Download all benchmark result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+          pattern: benchmark-*
+          merge-multiple: true
+
+      - name: Upload combined benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: all-results/
+          retention-days: 30
+
+      - name: Delete per-solver artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            const runArtifacts = artifacts.data.artifacts.filter(a =>
+              a.workflow_run?.id === ${{ github.run_id }} &&
+              a.name.startsWith('benchmark-') &&
+              a.name !== 'benchmark-results'
+            );
+            for (const artifact of runArtifacts) {
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id
+              });
+            }
+
       - name: Post combined results
         uses: actions/github-script@v7
         with:
