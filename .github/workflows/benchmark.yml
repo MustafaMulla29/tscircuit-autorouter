@@ -183,7 +183,7 @@ jobs:
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-${{ matrix.solver }}
+          name: results-${{ matrix.solver }}
           path: results/
           retention-days: 30
 
@@ -210,7 +210,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: all-results/
-          pattern: benchmark-*
+          pattern: results-*
           merge-multiple: true
 
       - name: Upload combined benchmark results
@@ -231,8 +231,7 @@ jobs:
             });
             const runArtifacts = artifacts.data.artifacts.filter(a =>
               a.workflow_run?.id === ${{ github.run_id }} &&
-              a.name.startsWith('benchmark-') &&
-              a.name !== 'benchmark-results'
+              (a.name.startsWith('results-') || a.name.startsWith('benchmark-row-'))
             );
             for (const artifact of runArtifacts) {
               await github.rest.actions.deleteArtifact({
