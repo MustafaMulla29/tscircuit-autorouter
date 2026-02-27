@@ -15,7 +15,7 @@ jobs:
       - name: Post comment with benchmark instructions
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.TSCIRCUIT_BOT_GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -57,7 +57,7 @@ jobs:
         id: running-comment
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.TSCIRCUIT_BOT_GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.reactions.createForIssueComment({
               owner: context.repo.owner,
@@ -191,7 +191,7 @@ jobs:
       - name: Update comment with results
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.TSCIRCUIT_BOT_GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const output = `${{ steps.benchmark.outputs.BENCHMARK_OUTPUT }}`;
             const solverName = '${{ steps.pr-info.outputs.solver_name }}' || 'default';
