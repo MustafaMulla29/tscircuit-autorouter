@@ -154,7 +154,7 @@ jobs:
 
           # Extract the data row from the results table and save to file
           mkdir -p /tmp/benchmark-row
-          grep -E "^\|" /tmp/benchmark_output.txt | grep -v "Solver" | grep -v "Completed" > /tmp/benchmark-row/row.txt || true
+               grep -E "^\|" /tmp/benchmark_output.txt | grep -v "Completed %" > /tmp/benchmark-row/row.txt || true                   
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
