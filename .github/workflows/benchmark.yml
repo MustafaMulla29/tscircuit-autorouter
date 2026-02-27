@@ -152,12 +152,9 @@ jobs:
 
           $CMD 2>&1 | tee /tmp/benchmark_output.txt || true
 
-          # Extract the data row from the results table
-          {
-            echo "BENCHMARK_ROW<<EOFMARKER"
-            grep -E "^\|" /tmp/benchmark_output.txt | grep -v "Solver" | grep -v "Completed" || true
-            echo "EOFMARKER"
-          } >> $GITHUB_OUTPUT
+          # Extract the data row from the results table and save to file
+          mkdir -p /tmp/benchmark-row
+          grep -E "^\|" /tmp/benchmark_output.txt | grep -v "Solver" | grep -v "Completed" > /tmp/benchmark-row/row.txt || true
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
@@ -166,17 +163,24 @@ jobs:
           path: results/
           retention-days: 30
 
+      - name: Upload benchmark row
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-row-${{ matrix.solver }}
+          path: /tmp/benchmark-row/row.txt
+          retention-days: 1
+
   report:
     name: Post benchmark results
     needs: [setup, benchmark]
     if: always() && needs.setup.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Download all benchmark artifacts
+      - name: Download benchmark row artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-results/
-          pattern: benchmark-*
+          path: benchmark-rows/
+          pattern: benchmark-row-*
 
       - name: Post combined results
         uses: actions/github-script@v7
@@ -184,48 +188,19 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-
-            // Collect all result rows from artifact files
-            let rows = [];
-            const artifactsDir = 'all-results';
-            if (fs.existsSync(artifactsDir)) {
-              const dirs = fs.readdirSync(artifactsDir);
-              for (const dir of dirs) {
-                const dirPath = `${artifactsDir}/${dir}`;
-                const files = fs.readdirSync(dirPath);
-                for (const file of files) {
-                  if (file.endsWith('.txt')) {
-                    const content = fs.readFileSync(`${dirPath}/${file}`, 'utf8');
-                    const dataRows = content.split('\n')
-                      .filter(l => l.startsWith('|') && !l.includes('Solver') && !l.includes('Completed'));
-                    rows.push(...dataRows);
-                  }
-                }
-              }
-            }
-
-            // If no txt files found, try to parse from the HTML result files
-            // Build table from benchmark job names
             const solvers = ${{ needs.setup.outputs.solvers }};
-            const jobs = await github.rest.actions.listJobsForWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: ${{ github.run_id }}
-            });
 
-            // Parse results from each solver's benchmark output
             let tableRows = '';
             for (const solver of solvers) {
-              const job = jobs.data.jobs.find(j => j.name === `Benchmark ${solver}`);
-              const status = job ? (job.conclusion === 'success' ? '✅' : '❌') : '⏳';
-
-              // Try to find result row from artifacts
-              const matchingRow = rows.find(r => r.includes(solver));
-              if (matchingRow) {
-                tableRows += matchingRow + '\n';
-              } else {
-                tableRows += `| ${solver.padEnd(45)} | ${status.padEnd(11)} | n/a                | n/a      | n/a      |\n`;
+              const rowFile = `benchmark-rows/benchmark-row-${solver}/row.txt`;
+              if (fs.existsSync(rowFile)) {
+                const row = fs.readFileSync(rowFile, 'utf8').trim();
+                if (row) {
+                  tableRows += row + '\n';
+                  continue;
+                }
               }
+              tableRows += `| ${solver.padEnd(45)} | failed      | n/a                | n/a      | n/a      |\n`;
             }
 
             const scenarioLimit = '${{ needs.setup.outputs.scenario_limit }}' || 'all';
