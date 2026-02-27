@@ -127,29 +127,49 @@ jobs:
           SOLVER_NAME="${{ steps.pr-info.outputs.solver_name }}"
           SCENARIO_LIMIT="${{ steps.pr-info.outputs.scenario_limit }}"
 
-          # Build command with optional solver name and scenario limit
-          CMD="autorouting-dataset-runner benchmark-solver.ts"
-
-          if [ -n "$SOLVER_NAME" ]; then
-            CMD="$CMD $SOLVER_NAME"
-            echo "Running benchmark with solver: $SOLVER_NAME"
-          else
-            echo "Running benchmark with default solver"
-          fi
-
+          LIMIT_FLAG=""
           if [ -n "$SCENARIO_LIMIT" ]; then
-            CMD="$CMD --scenario-limit $SCENARIO_LIMIT"
+            LIMIT_FLAG="--scenario-limit $SCENARIO_LIMIT"
             echo "Scenario limit: $SCENARIO_LIMIT"
           else
             echo "Running all scenarios"
           fi
 
-          # Run and capture output while showing live progress
-          $CMD 2>&1 | tee /tmp/benchmark_output.txt || true
+          if [ -n "$SOLVER_NAME" ]; then
+            SOLVERS="$SOLVER_NAME"
+            echo "Running benchmark with solver: $SOLVER_NAME"
+          else
+            SOLVERS="AutoroutingPipelineSolver AutoroutingPipelineSolver3_HgPortPointPathing AutoroutingPipeline1_OriginalUnravel AssignableAutoroutingPipeline2 AssignableAutoroutingPipeline3"
+            echo "Running benchmark with all pipeline solvers"
+          fi
+
+          > /tmp/benchmark_output.txt
+          PIDS=""
+          for SOLVER in $SOLVERS; do
+            echo "Starting benchmark for $SOLVER"
+            (
+              echo "=== Benchmarking $SOLVER ===" > /tmp/benchmark_${SOLVER}.txt
+              autorouting-dataset-runner benchmark-solver.ts $SOLVER $LIMIT_FLAG >> /tmp/benchmark_${SOLVER}.txt 2>&1 || true
+            ) &
+            PIDS="$PIDS $!"
+          done
+
+          # Wait for all benchmarks to finish
+          for PID in $PIDS; do
+            wait $PID || true
+          done
+
+          # Combine results in order
+          for SOLVER in $SOLVERS; do
+            cat /tmp/benchmark_${SOLVER}.txt >> /tmp/benchmark_output.txt
+            echo "" >> /tmp/benchmark_output.txt
+          done
 
           # Extract only key info for the comment (to avoid "Argument list too long" error)
           {
             echo "BENCHMARK_OUTPUT<<EOFMARKER"
+            # Get solver headers
+            grep -E "^===" /tmp/benchmark_output.txt || true
             # Get loading/using autorouter lines
             grep -E "^(Loading|✓ Using|✓ From)" /tmp/benchmark_output.txt || true
             echo ""
@@ -157,7 +177,7 @@ jobs:
             grep -E "^[+|]" /tmp/benchmark_output.txt || true
             echo ""
             # Get summary lines
-            grep -E "^(Scenarios:|✓)" /tmp/benchmark_output.txt | tail -3 || true
+            grep -E "^(Scenarios:|✓)" /tmp/benchmark_output.txt | tail -20 || true
             echo "EOFMARKER"
           } >> $GITHUB_OUTPUT
 
