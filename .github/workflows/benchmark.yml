@@ -30,15 +30,14 @@ jobs:
             \`\`\`
 
             **Examples:**
-            - \`/benchmark\` - Run with default solver, all scenarios
+            - \`/benchmark\` - Run all solvers, all scenarios
             - \`/benchmark AutoroutingPipelineSolver3_HgPortPointPathing\` - Run with specific solver
             - \`/benchmark AutoroutingPipelineSolver3_HgPortPointPathing 10\` - Run with specific solver, 10 scenarios
-            - \`/benchmark _ 20\` - Run with default solver, 20 scenarios`
+            - \`/benchmark _ 20\` - Run all solvers, 20 scenarios`
             });
 
-  benchmark:
-    name: Run autorouting benchmark
-    # Only run on PR comments with /benchmark command from maintainers (not bots)
+  setup:
+    name: Setup benchmark
     if: |
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
@@ -50,8 +49,11 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    outputs:
+      solvers: ${{ steps.parse.outputs.solvers }}
+      scenario_limit: ${{ steps.parse.outputs.scenario_limit }}
+      comment_id: ${{ steps.running-comment.outputs.comment_id }}
+      sha: ${{ steps.parse.outputs.sha }}
     steps:
       - name: React to comment and post running status
         id: running-comment
@@ -74,8 +76,8 @@ jobs:
             });
             core.setOutput('comment_id', comment.data.id);
 
-      - name: Get PR branch and parse solver name
-        id: pr-info
+      - name: Parse command and get PR info
+        id: parse
         uses: actions/github-script@v7
         with:
           script: |
@@ -84,18 +86,35 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.issue.number
             });
-            core.setOutput('ref', pr.data.head.ref);
             core.setOutput('sha', pr.data.head.sha);
 
-            // Parse solver name and scenario limit from comment: /benchmark [SolverName] [limit]
-            // Examples: /benchmark, /benchmark SolverName, /benchmark SolverName 50, /benchmark _ 50
             const comment = context.payload.comment.body;
             const match = comment.match(/\/benchmark(?:\s+(\S+))?(?:\s+(\d+))?/);
             const solverName = match && match[1] && match[1] !== '_' ? match[1] : '';
             const scenarioLimit = match && match[2] ? match[2] : '';
-            core.setOutput('solver_name', solverName);
+
+            const allSolvers = [
+              'AutoroutingPipelineSolver',
+              'AutoroutingPipelineSolver3_HgPortPointPathing',
+              'AutoroutingPipeline1_OriginalUnravel',
+              'AssignableAutoroutingPipeline2',
+              'AssignableAutoroutingPipeline3'
+            ];
+
+            const solvers = solverName ? [solverName] : allSolvers;
+            core.setOutput('solvers', JSON.stringify(solvers));
             core.setOutput('scenario_limit', scenarioLimit);
 
+  benchmark:
+    name: Benchmark ${{ matrix.solver }}
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        solver: ${{ fromJson(needs.setup.outputs.solvers) }}
+    steps:
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
@@ -121,95 +140,114 @@ jobs:
           export * from "./lib"
           EOF
 
-      - name: Run benchmark
+      - name: Run benchmark for ${{ matrix.solver }}
         id: benchmark
         run: |
-          SOLVER_NAME="${{ steps.pr-info.outputs.solver_name }}"
-          SCENARIO_LIMIT="${{ steps.pr-info.outputs.scenario_limit }}"
+          SCENARIO_LIMIT="${{ needs.setup.outputs.scenario_limit }}"
+          CMD="autorouting-dataset-runner benchmark-solver.ts ${{ matrix.solver }}"
 
-          LIMIT_FLAG=""
           if [ -n "$SCENARIO_LIMIT" ]; then
-            LIMIT_FLAG="--scenario-limit $SCENARIO_LIMIT"
-            echo "Scenario limit: $SCENARIO_LIMIT"
-          else
-            echo "Running all scenarios"
+            CMD="$CMD --scenario-limit $SCENARIO_LIMIT"
           fi
 
-          if [ -n "$SOLVER_NAME" ]; then
-            SOLVERS="$SOLVER_NAME"
-            echo "Running benchmark with solver: $SOLVER_NAME"
-          else
-            SOLVERS="AutoroutingPipelineSolver AutoroutingPipelineSolver3_HgPortPointPathing AutoroutingPipeline1_OriginalUnravel AssignableAutoroutingPipeline2 AssignableAutoroutingPipeline3"
-            echo "Running benchmark with all pipeline solvers"
-          fi
+          $CMD 2>&1 | tee /tmp/benchmark_output.txt || true
 
-          > /tmp/benchmark_output.txt
-          PIDS=""
-          for SOLVER in $SOLVERS; do
-            echo "Starting benchmark for $SOLVER"
-            (
-              echo "=== Benchmarking $SOLVER ==="
-              autorouting-dataset-runner benchmark-solver.ts $SOLVER $LIMIT_FLAG 2>&1 || true
-            ) > >(tee /tmp/benchmark_${SOLVER}.txt) 2>&1 &
-            PIDS="$PIDS $!"
-          done
-
-          # Wait for all benchmarks to finish
-          for PID in $PIDS; do
-            wait $PID || true
-          done
-
-          # Combine results in order
-          for SOLVER in $SOLVERS; do
-            cat /tmp/benchmark_${SOLVER}.txt >> /tmp/benchmark_output.txt
-            echo "" >> /tmp/benchmark_output.txt
-          done
-
-          # Extract only key info for the comment (to avoid "Argument list too long" error)
+          # Extract the data row from the results table
           {
-            echo "BENCHMARK_OUTPUT<<EOFMARKER"
-            # Get solver headers
-            grep -E "^===" /tmp/benchmark_output.txt || true
-            # Get loading/using autorouter lines
-            grep -E "^(Loading|✓ Using|✓ From)" /tmp/benchmark_output.txt || true
-            echo ""
-            # Get the results table (lines with + or |)
-            grep -E "^[+|]" /tmp/benchmark_output.txt || true
-            echo ""
-            # Get summary lines
-            grep -E "^(Scenarios:|✓)" /tmp/benchmark_output.txt | tail -20 || true
+            echo "BENCHMARK_ROW<<EOFMARKER"
+            grep -E "^\|" /tmp/benchmark_output.txt | grep -v "Solver" | grep -v "Completed" || true
             echo "EOFMARKER"
           } >> $GITHUB_OUTPUT
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
+          name: benchmark-${{ matrix.solver }}
           path: results/
           retention-days: 30
 
-      - name: Update comment with results
+  report:
+    name: Post benchmark results
+    needs: [setup, benchmark]
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+          pattern: benchmark-*
+
+      - name: Post combined results
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const output = `${{ steps.benchmark.outputs.BENCHMARK_OUTPUT }}`;
-            const solverName = '${{ steps.pr-info.outputs.solver_name }}' || 'default';
-            const scenarioLimit = '${{ steps.pr-info.outputs.scenario_limit }}' || 'all';
+            const fs = require('fs');
+
+            // Collect all result rows from artifact files
+            let rows = [];
+            const artifactsDir = 'all-results';
+            if (fs.existsSync(artifactsDir)) {
+              const dirs = fs.readdirSync(artifactsDir);
+              for (const dir of dirs) {
+                const dirPath = `${artifactsDir}/${dir}`;
+                const files = fs.readdirSync(dirPath);
+                for (const file of files) {
+                  if (file.endsWith('.txt')) {
+                    const content = fs.readFileSync(`${dirPath}/${file}`, 'utf8');
+                    const dataRows = content.split('\n')
+                      .filter(l => l.startsWith('|') && !l.includes('Solver') && !l.includes('Completed'));
+                    rows.push(...dataRows);
+                  }
+                }
+              }
+            }
+
+            // If no txt files found, try to parse from the HTML result files
+            // Build table from benchmark job names
+            const solvers = ${{ needs.setup.outputs.solvers }};
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: ${{ github.run_id }}
+            });
+
+            // Parse results from each solver's benchmark output
+            let tableRows = '';
+            for (const solver of solvers) {
+              const job = jobs.data.jobs.find(j => j.name === `Benchmark ${solver}`);
+              const status = job ? (job.conclusion === 'success' ? '✅' : '❌') : '⏳';
+
+              // Try to find result row from artifacts
+              const matchingRow = rows.find(r => r.includes(solver));
+              if (matchingRow) {
+                tableRows += matchingRow + '\n';
+              } else {
+                tableRows += `| ${solver.padEnd(45)} | ${status.padEnd(11)} | n/a                | n/a      | n/a      |\n`;
+              }
+            }
+
+            const scenarioLimit = '${{ needs.setup.outputs.scenario_limit }}' || 'all';
+
+            const table = `+-----------------------------------------------+-------------+--------------------+----------+----------+
+            | Solver                                        | Completed % | Relaxed DRC Pass % | P50 Time | P95 Time |
+            +-----------------------------------------------+-------------+--------------------+----------+----------+
+            ${tableRows}+-----------------------------------------------+-------------+--------------------+----------+----------+`;
 
             await github.rest.issues.updateComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: ${{ steps.running-comment.outputs.comment_id }},
+              comment_id: ${{ needs.setup.outputs.comment_id }},
               body: `## 🏃 Autorouting Benchmark Results
 
-            **Solver:** ${solverName} | **Scenarios:** ${scenarioLimit}
+            **Solvers:** ${solvers.length} | **Scenarios:** ${scenarioLimit}
 
             \`\`\`
-            ${output}
+            ${table}
             \`\`\`
 
             📊 [Download HTML visualization and bundle](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)
 
-            <sub>Triggered by @${{ github.event.comment.user.login }} • Commit: ${{ steps.pr-info.outputs.sha }}</sub>`
+            <sub>Triggered by @${{ github.event.comment.user.login }} • Commit: ${{ needs.setup.outputs.sha }}</sub>`
             });
