@@ -190,25 +190,39 @@ jobs:
             const fs = require('fs');
             const solvers = ${{ needs.setup.outputs.solvers }};
 
-            let tableRows = '';
+            // Parse each solver's result row into columns
+            const results = [];
             for (const solver of solvers) {
               const rowFile = `benchmark-rows/benchmark-row-${solver}/row.txt`;
+              let cols = null;
               if (fs.existsSync(rowFile)) {
                 const row = fs.readFileSync(rowFile, 'utf8').trim();
                 if (row) {
-                  tableRows += row + '\n';
-                  continue;
+                  cols = row.split('|').filter(c => c.trim()).map(c => c.trim());
                 }
               }
-              tableRows += `| ${solver.padEnd(45)} | failed      | n/a                | n/a      | n/a      |\n`;
+              if (cols && cols.length >= 5) {
+                results.push(cols);
+              } else {
+                results.push([solver, 'failed', 'n/a', 'n/a', 'n/a']);
+              }
             }
 
-            const scenarioLimit = '${{ needs.setup.outputs.scenario_limit }}' || 'all';
+            // Calculate max width for each column
+            const headers = ['Solver', 'Completed %', 'Relaxed DRC Pass %', 'P50 Time', 'P95 Time'];
+            const widths = headers.map((h, i) =>
+              Math.max(h.length, ...results.map(r => (r[i] || '').length))
+            );
 
-            const table = `+-----------------------------------------------+-------------+--------------------+----------+----------+
-            | Solver                                        | Completed % | Relaxed DRC Pass % | P50 Time | P95 Time |
-            +-----------------------------------------------+-------------+--------------------+----------+----------+
-            ${tableRows}+-----------------------------------------------+-------------+--------------------+----------+----------+`;
+            const sep = '+' + widths.map(w => '-'.repeat(w + 2)).join('+') + '+';
+            const headerRow = '|' + headers.map((h, i) => ` ${h.padEnd(widths[i])} `).join('|') + '|';
+            const dataRows = results.map(r =>
+              '|' + r.map((c, i) => ` ${c.padEnd(widths[i])} `).join('|') + '|'
+            ).join('\n');
+
+            const table = [sep, headerRow, sep, dataRows, sep].join('\n');
+
+            const scenarioLimit = '${{ needs.setup.outputs.scenario_limit }}' || 'all';
 
             await github.rest.issues.updateComment({
               owner: context.repo.owner,
