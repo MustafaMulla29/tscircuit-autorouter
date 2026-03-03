@@ -74,7 +74,7 @@ jobs:
           script: |
             const isComment = context.eventName === 'issue_comment'
             let solverName = ''
-            let scenarioLimit = ''
+            let scenarioLimit = '2'
             let concurrency = '16'
             let ref = context.sha
             let statusCommentId = ''
