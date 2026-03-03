@@ -161,12 +161,47 @@ const formatTable = (rows: SolverRunResult[]) => {
   return [separator, headerLine, separator, ...bodyLines, separator].join("\n")
 }
 
-const runSolverWithWorkers = async (
-  solverName: string,
+const runAllSolversWithGlobalPool = async (
+  solvers: string[],
   scenarios: Array<[string, SimpleRouteJson]>,
   concurrency: number,
-) => {
-  const workerCount = Math.min(concurrency, scenarios.length)
+): Promise<SolverRunResult[]> => {
+  type Task = {
+    solverName: string
+    solverIndex: number
+    scenarioIndex: number
+    scenarioName: string
+    scenario: SimpleRouteJson
+  }
+
+  // Build flat task list: every (solver, scenario) pair
+  const tasks: Task[] = []
+  for (let si = 0; si < solvers.length; si++) {
+    for (let sci = 0; sci < scenarios.length; sci++) {
+      const [scenarioName, scenario] = scenarios[sci]
+      tasks.push({
+        solverName: solvers[si],
+        solverIndex: si,
+        scenarioIndex: sci,
+        scenarioName,
+        scenario,
+      })
+    }
+  }
+
+  // Per-solver result tracking
+  const results: WorkerResult[][] = solvers.map(() =>
+    new Array(scenarios.length),
+  )
+  const solvedCounts = new Array<number>(solvers.length).fill(0)
+  const completedCounts = new Array<number>(solvers.length).fill(0)
+
+  // Global pool — concurrency workers total across ALL solvers
+  const workerCount = Math.min(concurrency, tasks.length)
+  console.log(
+    `Running ${solvers.length} solver(s) × ${scenarios.length} scenario(s) = ${tasks.length} tasks with ${workerCount} global workers`,
+  )
+
   const workers = Array.from(
     { length: workerCount },
     () =>
@@ -175,37 +210,35 @@ const runSolverWithWorkers = async (
       }),
   )
 
-  const results = new Array<WorkerResult>(scenarios.length)
-  let nextScenarioIndex = 0
-  let completed = 0
-  let solvedCount = 0
+  let nextTaskIndex = 0
 
   const assignWork = (worker: Worker): Promise<void> => {
     return new Promise((resolve) => {
       const sendNext = () => {
-        if (nextScenarioIndex >= scenarios.length) {
+        if (nextTaskIndex >= tasks.length) {
           resolve()
           return
         }
 
-        const scenarioIndex = nextScenarioIndex
-        nextScenarioIndex += 1
-        const [scenarioName, scenario] = scenarios[scenarioIndex]
+        const task = tasks[nextTaskIndex]
+        nextTaskIndex += 1
 
         const onMessage = (event: MessageEvent<WorkerResult>) => {
           worker.removeEventListener("message", onMessage)
           const result = event.data
-          results[scenarioIndex] = result
-          completed += 1
+          results[task.solverIndex][task.scenarioIndex] = result
+          completedCounts[task.solverIndex] += 1
           if (result.didSolve) {
-            solvedCount += 1
+            solvedCounts[task.solverIndex] += 1
           }
 
+          const completed = completedCounts[task.solverIndex]
+          const solved = solvedCounts[task.solverIndex]
           const status = result.didSolve ? "solved" : "failed"
-          const successRate = (solvedCount / completed) * 100
+          const successRate = (solved / completed) * 100
           const suffix = result.error ? ` (${result.error})` : ""
           console.log(
-            `[${solverName}] ${successRate.toFixed(1)}% success (${solvedCount}/${completed}) ${status} ${result.scenarioName} ${formatTime(result.elapsedTimeMs)}${suffix}`,
+            `[${task.solverName}] ${successRate.toFixed(1)}% success (${solved}/${completed}) ${status} ${result.scenarioName} ${formatTime(result.elapsedTimeMs)}${suffix}`,
           )
 
           sendNext()
@@ -213,9 +246,9 @@ const runSolverWithWorkers = async (
 
         worker.addEventListener("message", onMessage)
         worker.postMessage({
-          solverName,
-          scenarioName,
-          scenario,
+          solverName: task.solverName,
+          scenarioName: task.scenarioName,
+          scenario: task.scenario,
         })
       }
 
@@ -231,19 +264,22 @@ const runSolverWithWorkers = async (
     }
   }
 
-  const succeeded = results.filter((result) => result.didSolve)
-  const elapsedForSucceeded = succeeded.map((result) => result.elapsedTimeMs)
-  const relaxedDrcPassed = succeeded.filter(
-    (result) => result.relaxedDrcPassed,
-  ).length
+  return solvers.map((solverName, si) => {
+    const solverResults = results[si]
+    const succeeded = solverResults.filter((r) => r.didSolve)
+    const elapsedForSucceeded = succeeded.map((r) => r.elapsedTimeMs)
+    const relaxedDrcPassed = succeeded.filter(
+      (r) => r.relaxedDrcPassed,
+    ).length
 
-  return {
-    solverName,
-    successRatePercent: (succeeded.length / scenarios.length) * 100,
-    relaxedDrcRatePercent: (relaxedDrcPassed / scenarios.length) * 100,
-    p50TimeMs: getPercentileMs(elapsedForSucceeded, 0.5),
-    p95TimeMs: getPercentileMs(elapsedForSucceeded, 0.95),
-  } satisfies SolverRunResult
+    return {
+      solverName,
+      successRatePercent: (succeeded.length / scenarios.length) * 100,
+      relaxedDrcRatePercent: (relaxedDrcPassed / scenarios.length) * 100,
+      p50TimeMs: getPercentileMs(elapsedForSucceeded, 0.5),
+      p95TimeMs: getPercentileMs(elapsedForSucceeded, 0.95),
+    } satisfies SolverRunResult
+  })
 }
 
 const main = async () => {
@@ -262,13 +298,7 @@ const main = async () => {
     throw new Error("No benchmark scenarios found")
   }
 
-  const rows: SolverRunResult[] = []
-
-  for (const solver of solvers) {
-    console.log(`\n=== Benchmarking ${solver} ===`)
-    const row = await runSolverWithWorkers(solver, scenarios, concurrency)
-    rows.push(row)
-  }
+  const rows = await runAllSolversWithGlobalPool(solvers, scenarios, concurrency)
 
   const table = formatTable(rows)
   const output = `${table}\n\nScenarios: ${scenarios.length}\n`
