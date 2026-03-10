@@ -338,6 +338,7 @@ export class AutoroutingPipelineSolver2_PortPointPathing extends BaseSolver {
         connMap: cms.connMap,
         viaDiameter: cms.viaDiameter,
         traceWidth: cms.minTraceWidth,
+        effort: cms.effort,
       },
     ]),
     definePipelineStep(
