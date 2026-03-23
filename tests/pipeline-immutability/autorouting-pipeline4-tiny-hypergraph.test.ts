@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test"
-import { AutoroutingPipelineSolver3_HgPortPointPathing } from "lib/autorouter-pipelines/AutoroutingPipeline3_HgPortPointPathing/AutoroutingPipelineSolver3_HgPortPointPathing"
+import { AutoroutingPipelineSolver4 } from "lib/autorouter-pipelines/AutoroutingPipeline4_TinyHypergraph/AutoroutingPipelineSolver4_TinyHypergraph"
 import type { SimpleRouteJson } from "lib/types"
 import e2e3Fixture from "../../fixtures/legacy/assets/e2e3.json"
 
 test(
-  "AutoroutingPipelineSolver3_HgPortPointPathing solves and does not mutate input SRJ",
+  "AutoroutingPipelineSolver4 solves and does not mutate input SRJ",
   () => {
     const srj = e2e3Fixture as SimpleRouteJson
     const before = structuredClone(srj)
 
-    const solver = new AutoroutingPipelineSolver3_HgPortPointPathing(srj)
+    const solver = new AutoroutingPipelineSolver4(srj)
     solver.solve()
 
     expect(solver.solved).toBe(true)

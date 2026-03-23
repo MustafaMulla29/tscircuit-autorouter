@@ -1,3 +1,4 @@
+import { PipelineStagesTable } from "@tscircuit/solver-utils/react"
 import { GraphicsObject, Line, Point, Rect } from "graphics-debug"
 import {
   InteractiveGraphics,
@@ -7,11 +8,12 @@ import { AssignableAutoroutingPipeline1Solver } from "lib/autorouter-pipelines/A
 import { AssignableAutoroutingPipeline2 } from "lib/autorouter-pipelines/AssignableAutoroutingPipeline2/AssignableAutoroutingPipeline2"
 import { AssignableAutoroutingPipeline3 } from "lib/autorouter-pipelines/AssignableAutoroutingPipeline3/AssignableAutoroutingPipeline3"
 import { AutoroutingPipeline1_OriginalUnravel } from "lib/autorouter-pipelines/AutoroutingPipeline1_OriginalUnravel/AutoroutingPipeline1_OriginalUnravel"
+import { AutoroutingPipelineSolver3_HgPortPointPathing } from "lib/autorouter-pipelines/AutoroutingPipeline3_HgPortPointPathing/AutoroutingPipelineSolver3_HgPortPointPathing"
+import { AutoroutingPipelineSolver4 } from "lib/autorouter-pipelines/AutoroutingPipeline4_TinyHypergraph/AutoroutingPipelineSolver4_TinyHypergraph"
 import {
   AutoroutingPipelineSolver2_PortPointPathing,
   CapacityMeshSolver,
 } from "lib/autorouter-pipelines/AutoroutingPipeline2_PortPointPathing/AutoroutingPipelineSolver2_PortPointPathing"
-import { AutoroutingPipelineSolver3_HgPortPointPathing } from "lib/autorouter-pipelines/AutoroutingPipeline2_PortPointPathing/AutoroutingPipelineSolver3_HgPortPointPathing"
 import {
   getGlobalInMemoryCache,
   getGlobalLocalStorageCache,
@@ -24,7 +26,6 @@ import { addVisualizationToLastStep } from "lib/utils/addVisualizationToLastStep
 import { combineVisualizations } from "lib/utils/combineVisualizations"
 import { limitVisualizations } from "lib/utils/limitVisualizations"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { PipelineStagesTable } from "@tscircuit/solver-utils/react"
 import {
   AutoroutingPipelineMenuBar,
   EFFORT_LEVELS,
@@ -35,8 +36,8 @@ import {
   type PipelineId,
 } from "./AutoroutingPipelineMenuBar"
 import { CacheDebugger } from "./CacheDebugger"
-import { RELAXED_DRC_OPTIONS } from "./drcPresets"
 import { SolveBreakpointDialog } from "./SolveBreakpointDialog"
+import { RELAXED_DRC_OPTIONS } from "./drcPresets"
 import { getDrcErrors } from "./getDrcErrors"
 import { convertToCircuitJson } from "./utils/convertToCircuitJson"
 import { filterUnravelMultiSectionInput } from "./utils/filterUnravelMultiSectionInput"
@@ -44,6 +45,7 @@ import { filterUnravelMultiSectionInput } from "./utils/filterUnravelMultiSectio
 const PIPELINE_SOLVERS = {
   AutoroutingPipelineSolver2_PortPointPathing,
   AutoroutingPipelineSolver3_HgPortPointPathing,
+  AutoroutingPipelineSolver4,
   AssignableAutoroutingPipeline1Solver,
   AssignableAutoroutingPipeline2,
   AssignableAutoroutingPipeline3,

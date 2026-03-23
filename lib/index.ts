@@ -5,7 +5,8 @@ export {
 export { AutoroutingPipeline1_OriginalUnravel } from "./autorouter-pipelines/AutoroutingPipeline1_OriginalUnravel/AutoroutingPipeline1_OriginalUnravel"
 export { AssignableAutoroutingPipeline2 } from "./autorouter-pipelines/AssignableAutoroutingPipeline2/AssignableAutoroutingPipeline2"
 export { AssignableAutoroutingPipeline3 } from "./autorouter-pipelines/AssignableAutoroutingPipeline3/AssignableAutoroutingPipeline3"
-export { AutoroutingPipelineSolver3_HgPortPointPathing } from "./autorouter-pipelines/AutoroutingPipeline2_PortPointPathing/AutoroutingPipelineSolver3_HgPortPointPathing"
+export { AutoroutingPipelineSolver3_HgPortPointPathing } from "./autorouter-pipelines/AutoroutingPipeline3_HgPortPointPathing/AutoroutingPipelineSolver3_HgPortPointPathing"
+export { AutoroutingPipelineSolver4 } from "./autorouter-pipelines/AutoroutingPipeline4_TinyHypergraph/AutoroutingPipelineSolver4_TinyHypergraph"
 export {
   getTunedTotalCapacity1,
   calculateOptimalCapacityDepth,
@@ -26,3 +27,4 @@ export type {
   Jumper,
   HighDensityIntraNodeRouteWithJumpers,
 } from "./types/high-density-types"
+export { HyperSingleIntraNodeSolver } from "./solvers/HyperHighDensitySolver/HyperSingleIntraNodeSolver"
