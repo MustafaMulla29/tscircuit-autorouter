@@ -11,6 +11,7 @@ const srj = bugReport.simple_route_json as SimpleRouteJson
 test("bugreport03-fe4a17.json-AutoroutingPipeline1_OriginalUnravel", () => {
   const solver = new AutoroutingPipeline1_OriginalUnravel(srj)
   solver.solve()
+
   expect(getLastStepSvg(solver.visualize())).toMatchSvgSnapshot(
     import.meta.path,
   )

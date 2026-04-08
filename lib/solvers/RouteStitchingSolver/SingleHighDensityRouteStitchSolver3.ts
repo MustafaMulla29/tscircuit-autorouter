@@ -1,16 +1,18 @@
 import { distance } from "@tscircuit/math-utils"
 import { GraphicsObject } from "graphics-debug"
-import { HighDensityIntraNodeRoute, Jumper } from "lib/types/high-density-types"
+import { HighDensityIntraNodeRoute } from "lib/types/high-density-types"
 import { getJumpersGraphics } from "lib/utils/getJumperGraphics"
 import { BaseSolver } from "../BaseSolver"
 
 const VIA_PENALTY = 1000
 const GAP_PENALTY = 100000
 const GEOMETRIC_TOLERANCE = 1e-3
+export const MAX_STITCH_GAP_DISTANCE_3 = 1
+const MAX_TERMINAL_STITCH_GAP_DISTANCE_3 = 1.25
 
-export class SingleHighDensityRouteStitchSolver extends BaseSolver {
+export class SingleHighDensityRouteStitchSolver3 extends BaseSolver {
   override getSolverName(): string {
-    return "SingleHighDensityRouteStitchSolver"
+    return "SingleHighDensityRouteStitchSolver3"
   }
 
   mergedHdRoute: HighDensityIntraNodeRoute
@@ -159,11 +161,19 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
     if (this.remainingHdRoutes.length === 0) {
       const lastMergedPoint =
         this.mergedHdRoute.route[this.mergedHdRoute.route.length - 1]
-      this.mergedHdRoute.route.push({
-        x: this.end.x,
-        y: this.end.y,
-        z: lastMergedPoint.z,
-      })
+
+      if (
+        distance(lastMergedPoint, this.end) > GEOMETRIC_TOLERANCE &&
+        distance(lastMergedPoint, this.end) <=
+          MAX_TERMINAL_STITCH_GAP_DISTANCE_3
+      ) {
+        this.mergedHdRoute.route.push({
+          x: this.end.x,
+          y: this.end.y,
+          z: lastMergedPoint.z,
+        })
+      }
+
       this.solved = true
       return
     }
@@ -187,13 +197,11 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
       if (lastMergedPoint.z === firstPointInCandidate.z) {
         if (distToFirst < GEOMETRIC_TOLERANCE) {
           scoreFirst = distToFirst
-        } else {
+        } else if (distToFirst <= MAX_STITCH_GAP_DISTANCE_3) {
           scoreFirst = GAP_PENALTY + distToFirst
         }
       } else if (distToFirst < GEOMETRIC_TOLERANCE) {
         scoreFirst = VIA_PENALTY + distToFirst
-      } else {
-        scoreFirst = GAP_PENALTY + distToFirst
       }
 
       if (scoreFirst < bestScore) {
@@ -206,13 +214,11 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
       if (lastMergedPoint.z === lastPointInCandidate.z) {
         if (distToLast < GEOMETRIC_TOLERANCE) {
           scoreLast = distToLast
-        } else {
+        } else if (distToLast <= MAX_STITCH_GAP_DISTANCE_3) {
           scoreLast = GAP_PENALTY + distToLast
         }
       } else if (distToLast < GEOMETRIC_TOLERANCE) {
         scoreLast = VIA_PENALTY + distToLast
-      } else {
-        scoreLast = GAP_PENALTY + distToLast
       }
 
       if (scoreLast < bestScore) {
@@ -223,8 +229,7 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
     }
 
     if (closestRouteIndex === -1) {
-      // Should not happen given the gap fallback, but if no routes remain, we are done
-      this.remainingHdRoutes = [] // Force exit next step
+      this.remainingHdRoutes = []
       return
     }
 
@@ -239,6 +244,7 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
     }
 
     if (
+      pointsToAdd.length > 0 &&
       distance(lastMergedPoint, pointsToAdd[0]) < GEOMETRIC_TOLERANCE &&
       lastMergedPoint.z === pointsToAdd[0].z
     ) {
@@ -260,7 +266,7 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
       lines: [],
       circles: [],
       rects: [],
-      title: "Single High Density Route Stitch Solver",
+      title: "Single High Density Route Stitch Solver 3",
     }
 
     graphics.points?.push(
@@ -313,23 +319,20 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
       }
     }
 
-    for (const [i, hdRoute] of this.remainingHdRoutes.entries()) {
-      const routeColor = this.colorMap[hdRoute.connectionName] ?? "gray"
+    for (const hdRoute of this.remainingHdRoutes) {
       graphics.lines?.push({
         points: hdRoute.route.map((point) => ({
           x: point.x,
           y: point.y,
         })),
-        strokeColor: routeColor,
+        strokeColor: "orange",
       })
 
-      for (let pi = 0; pi < hdRoute.route.length; pi++) {
-        const point = hdRoute.route[pi]
+      for (const point of hdRoute.route) {
         graphics.points?.push({
-          x: point.x + ((i % 2) - 0.5) / 500 + ((pi % 8) - 4) / 1000,
-          y: point.y + ((i % 2) - 0.5) / 500 + ((pi % 8) - 4) / 1000,
-          color: routeColor,
-          label: `Route ${hdRoute.connectionName} ${point === hdRoute.route[0] ? "First" : point === hdRoute.route[hdRoute.route.length - 1] ? "Last" : ""}`,
+          x: point.x,
+          y: point.y,
+          color: "orange",
         })
       }
 
@@ -337,13 +340,13 @@ export class SingleHighDensityRouteStitchSolver extends BaseSolver {
         graphics.circles?.push({
           center: { x: via.x, y: via.y },
           radius: hdRoute.viaDiameter / 2,
-          fill: routeColor,
+          fill: "orange",
         })
       }
 
       if (hdRoute.jumpers && hdRoute.jumpers.length > 0) {
         const jumperGraphics = getJumpersGraphics(hdRoute.jumpers, {
-          color: routeColor,
+          color: "orange",
           label: hdRoute.connectionName,
         })
         graphics.rects!.push(...(jumperGraphics.rects ?? []))
